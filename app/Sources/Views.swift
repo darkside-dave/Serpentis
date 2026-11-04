@@ -3,15 +3,17 @@ import SwiftUI
 import AppKit
 
 enum PaneSection: String, CaseIterable, Identifiable {
-    case buttons = "Buttons", performance = "Performance", lighting = "Lighting", power = "Power", profiles = "Profiles", about = "About"
+    case buttons = "Buttons", performance = "Performance", input = "Pointer & Scrolling", lighting = "Lighting", power = "Power", profiles = "Profiles", troubleshooting = "Troubleshooting", about = "About"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .buttons: return "square.grid.3x3"
         case .performance: return "speedometer"
+        case .input: return "cursorarrow.motionlines"
         case .lighting: return "lightbulb"
         case .power: return "battery.75"
         case .profiles: return "person.crop.square"
+        case .troubleshooting: return "wrench.and.screwdriver"
         case .about: return "info.circle"
         }
     }
@@ -19,11 +21,10 @@ enum PaneSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var model: SerpentisModel
-    @LocalState private var section: PaneSection? = .buttons
 
     var body: some View {
         NavigationSplitView {
-            List(PaneSection.allCases, selection: $section) { s in
+            List(PaneSection.allCases, selection: $model.selectedSection) { s in
                 Label(s.rawValue, systemImage: s.icon).tag(s)
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 180)
@@ -32,22 +33,30 @@ struct ContentView: View {
                 StatusBar()
                 Divider()
                 Group {
-                    if section == .about {
+                    if model.selectedSection == .about {
                         AboutView()
+                    } else if model.selectedSection == .troubleshooting {
+                        TroubleshootingView()
+                    } else if model.selectedSection == .input {
+                        InputSettingsView()
+                    } else if model.selectedSection == .lighting && model.dockAvailable {
+                        LightingView()
                     } else if !model.connected {
-                        Placeholder(icon: "cable.connector", title: "Naga V3 Pro not connected",
-                                    text: "Plug in the mouse with the cable or the wireless receiver.")
+                        Placeholder(icon: "cable.connector", title: model.connectionIssue.isEmpty ? "Naga V3 Pro not connected" : "Mouse connection unavailable",
+                                    text: model.connectionIssue.isEmpty ? "Connect the USB cable, wireless receiver, or Mouse Dock Pro paired with a Naga V3 Pro." : model.connectionIssue)
                     } else if model.asleep {
                         Placeholder(icon: "moon.zzz", title: "Mouse is asleep", text: "Move the mouse to wake it, then click Refresh.")
                     } else if !model.loadedOnce {
                         ProgressView("Reading settings from the mouse…").frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        switch section ?? .buttons {
+                        switch model.selectedSection ?? .buttons {
                         case .buttons: ButtonsView()
                         case .performance: PerformanceView()
+                        case .input: InputSettingsView()
                         case .lighting: LightingView()
                         case .power: PowerView()
                         case .profiles: ProfilesView()
+                        case .troubleshooting: TroubleshootingView()
                         case .about: AboutView()
                         }
                     }
@@ -131,24 +140,23 @@ struct PadButton: View {
 struct MouseTopView: View {
     @Binding var selected: UInt8
     var body: some View {
-        let s = SerpentisModel.slots
-        ZStack {
-            RoundedRectangle(cornerRadius: 75).fill(Color.primary.opacity(0.04))
-                .overlay(RoundedRectangle(cornerRadius: 75).stroke(Color.primary.opacity(0.25), lineWidth: 1.5))
-                .frame(width: 180, height: 290).position(x: 90, y: 145)
-            Path { p in p.move(to: CGPoint(x: 90, y: 4)); p.addLine(to: CGPoint(x: 90, y: 40)) }
-                .stroke(Color.primary.opacity(0.25), lineWidth: 1)
-            Path { p in p.move(to: CGPoint(x: 90, y: 104)); p.addLine(to: CGPoint(x: 90, y: 115)) }
-                .stroke(Color.primary.opacity(0.25), lineWidth: 1)
-            Text("Left").font(.caption).foregroundStyle(.secondary).position(x: 42, y: 30)
-            Text("Right").font(.caption).foregroundStyle(.secondary).position(x: 138, y: 30)
-            PadButton(slot: s[13], selected: $selected, w: 28, h: 46).position(x: 52, y: 72)
-            PadButton(slot: s[12], selected: $selected, w: 36, h: 62).position(x: 90, y: 72)
-            PadButton(slot: s[14], selected: $selected, w: 28, h: 46).position(x: 128, y: 72)
-            PadButton(slot: s[15], selected: $selected, w: 46, h: 30).position(x: 90, y: 136)
-            Text("Top view").font(.caption2).foregroundStyle(.secondary).position(x: 90, y: 255)
+        VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                NagaIllustration()
+                NagaButtonTarget(id: 0x03, title: "3", selected: $selected, width: 24, height: 54).position(x: 116, y: 65)
+                NagaButtonTarget(id: 0x34, title: "◀", selected: $selected, width: 22, height: 28).position(x: 86, y: 65)
+                NagaButtonTarget(id: 0x35, title: "▶", selected: $selected, width: 22, height: 28).position(x: 146, y: 65)
+                NagaButtonTarget(id: 0x0B, title: "D+", selected: $selected, width: 24, height: 30)
+                    .rotationEffect(.degrees(12)).position(x: 40, y: 61)
+                NagaButtonTarget(id: 0x0C, title: "D−", selected: $selected, width: 24, height: 30)
+                    .rotationEffect(.degrees(8)).position(x: 34, y: 99)
+                NagaButtonTarget(id: 0x6A, title: "Mode", selected: $selected, width: 38, height: 20).position(x: 116, y: 128)
+                NagaButtonTarget(id: 0x80, title: "Rear", selected: $selected, width: 38, height: 20).position(x: 116, y: 153)
+                NagaButtonTarget(id: 0x39, title: "Ring", selected: $selected, width: 74, height: 24)
+                    .rotationEffect(.degrees(90)).position(x: 213, y: 197)
+            }.frame(width: 240, height: 320)
+            Text("Naga V3 Pro · top view").font(.caption).foregroundStyle(.secondary)
         }
-        .frame(width: 180, height: 290)
     }
 }
 
@@ -260,7 +268,7 @@ struct LayoutsBox: View {
                     Button("Save Current Buttons") {
                         let n = name.trimmingCharacters(in: .whitespaces)
                         if !n.isEmpty { model.saveLayout(n); name = "" }
-                    }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy > 0)
                     Spacer()
                     Button("Reset All Buttons to Default") { model.resetAllButtons() }
                 }
@@ -317,6 +325,89 @@ struct ButtonsView: View {
 
 // MARK: - Performance
 
+struct InputSettingsView: View {
+    @EnvironmentObject var input: MouseInputController
+    @EnvironmentObject var model: SerpentisModel
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                PaneHeader(title: "Pointer & Scrolling", subtitle: "Pointer speed, scroll direction and wheel behavior for your Naga.")
+                GroupBox("Pointer") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Disable mouse acceleration", isOn: Binding(get: { input.disableAcceleration }, set: { input.setDisableAcceleration($0) }))
+                            .toggleStyle(.checkbox)
+                        Text("Use constant pointer speed regardless of how quickly you move the mouse.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Divider().padding(.vertical, 4)
+                        HStack(spacing: 12) {
+                            Text("Sensitivity").font(.headline)
+                            Spacer()
+                            Text(String(format: "%.2f×", PointerSensitivity.gain(input.sensitivity))).foregroundStyle(.secondary).monospacedDigit()
+                            TextField("Sensitivity", value: Binding(get: { input.sensitivity }, set: { input.setSensitivity($0) }), format: .number)
+                                .frame(width: 72).multilineTextAlignment(.trailing).disabled(!input.canAdjustSensitivity)
+                            Button("Reset") { input.setSensitivity(1000) }.disabled(input.sensitivity == 1000)
+                        }
+                        HStack(spacing: 12) {
+                            Text("Slower").font(.caption).foregroundStyle(.secondary)
+                            Slider(value: Binding(get: { Double(input.sensitivity) }, set: { input.setSensitivity(Int($0.rounded())) }), in: 0...2000, step: 10)
+                                .accessibilityLabel("Pointer sensitivity").disabled(!input.canAdjustSensitivity)
+                            Text("Faster").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("1000 = normal · 2000 = 2× speed with acceleration disabled.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(input.accelerationStatus).font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }
+                GroupBox("Scroll Direction") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Invert scrolling", isOn: Binding(get: { input.invertScrolling }, set: { input.setInvertScrolling($0) }))
+                            .toggleStyle(.checkbox).disabled(!input.canIdentifyScrollDevices)
+                        Text("Reverse the wheel and horizontal tilt for this mouse.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(input.scrollingStatus).font(.caption).foregroundStyle(.secondary)
+                        if input.needsAccessibility {
+                            Button("Open Accessibility Settings…") { input.openAccessibility() }
+                            Text("Enable Serpentis, then reopen it if prompted.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }
+                if model.connected { WheelSettingsControls() }
+                Text("Pointer and scroll-direction changes apply while Serpentis runs. Wheel settings are saved to the mouse.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(24)
+        }.onAppear {
+            input.refresh()
+            if model.app != nil { model.refresh(.wheel) }
+        }
+    }
+}
+
+struct WheelSettingsControls: View {
+    @EnvironmentObject var model: SerpentisModel
+    var body: some View {
+        GroupBox("Scroll Wheel") {
+            VStack(alignment: .leading, spacing: 12) {
+                if let current = model.smartReel {
+                    Toggle("Smart Reel", isOn: Binding(get: { model.smartReel ?? current }, set: { model.setSmartReel($0) }))
+                        .toggleStyle(.checkbox)
+                    Text("Automatically switches to free spin when you scroll quickly.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let current = model.wheelMode {
+                    Picker("Wheel Mode", selection: Binding(get: { model.wheelMode ?? current }, set: { model.setWheelMode($0) })) {
+                        ForEach(WheelMode.allCases, id: \.self) { mode in Text(mode.name).tag(mode) }
+                    }.pickerStyle(.segmented)
+                }
+                if model.wheelMode == nil && model.smartReel == nil {
+                    Text("Wheel settings are unavailable for this connection.").font(.caption).foregroundStyle(.secondary)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                .disabled(model.busy > 0)
+        }
+    }
+}
+
 struct PerformanceView: View {
     @EnvironmentObject var model: SerpentisModel
     @LocalState private var values: [Int] = []
@@ -370,15 +461,7 @@ struct PerformanceView: View {
                         Text("Lasts until you press the DPI button").font(.caption).foregroundStyle(.secondary)
                     }.padding(10)
                 }
-                GroupBox("Polling Rate") {
-                    HStack {
-                        Picker("", selection: Binding(get: { model.polling ?? 1000 }, set: { model.setPolling($0) })) {
-                            Text("125 Hz").tag(125); Text("500 Hz").tag(500); Text("1000 Hz").tag(1000)
-                        }.pickerStyle(.segmented).labelsHidden().frame(width: 320)
-                        Spacer()
-                        Text("How often the mouse reports its position. 1000 Hz is smoothest.").font(.caption).foregroundStyle(.secondary)
-                    }.padding(10)
-                }
+                PollingRateControl(monitor: model.pollingMonitor)
             }.padding(24)
         }
         .onAppear { if !loaded { load(); loaded = true } }
@@ -388,6 +471,66 @@ struct PerformanceView: View {
     func load() {
         if let st = model.stages { values = st.stages.map { $0.x }; active = st.active }
         if let d = model.dpi { x = d.x; y = d.y }
+    }
+}
+
+struct PollingRateControl: View {
+    @EnvironmentObject var model: SerpentisModel
+    @ObservedObject var monitor: PollingMonitor
+    @LocalState private var index = 0.0
+
+    var body: some View {
+        GroupBox("Polling Rate") {
+            VStack(alignment: .leading, spacing: 12) {
+                Slider(value: $index, in: 0...Double(max(1, model.pollingRates.count - 1)), step: 1,
+                       onEditingChanged: { editing in if !editing { save() } })
+                    .disabled(model.polling == nil || model.busy > 0 || monitor.running)
+                    .accessibilityLabel("Polling rate")
+                    .accessibilityValue("\(selectedRate) Hz")
+                GeometryReader { geometry in
+                    ForEach(Array(model.pollingRates.enumerated()), id: \.offset) { position, hz in
+                        VStack(spacing: 3) {
+                            Rectangle().fill(Color.secondary.opacity(0.5)).frame(width: 1, height: 5)
+                            Text("\(hz)").font(.caption).monospacedDigit()
+                        }.position(x: 10 + (geometry.size.width - 20) * Double(position) / Double(max(1, model.pollingRates.count - 1)), y: 10)
+                    }
+                }.frame(height: 28)
+                HStack {
+                    Text(model.polling.map { "Configured: \($0) Hz" } ?? "Configured rate unavailable")
+                        .monospacedDigit()
+                    Spacer()
+                    Text("Selected: \(selectedRate) Hz").foregroundStyle(.secondary).monospacedDigit()
+                }
+                Divider()
+                HStack {
+                    Button(monitor.running ? "Stop Check" : "Check Report Rate") {
+                        if monitor.running { monitor.stop() } else { monitor.start(mouse: model.app?.mouse) }
+                    }.disabled(model.busy > 0 || model.polling == nil)
+                    if monitor.running { ProgressView().controlSize(.small) }
+                    Spacer()
+                    if let rate = monitor.observedRate {
+                        Text("Observed: ~\(Int(rate.rounded())) Hz").fontWeight(.medium).monospacedDigit()
+                    }
+                }
+                Text(monitor.message).font(.caption).foregroundStyle(.secondary)
+                Text("The check counts raw reports received by macOS. Pauses, motion and system scheduling can reduce the observed rate; it does not measure USB bus polling.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(10)
+        }
+        .onAppear { load() }
+        .onChange(of: model.polling) { _ in load() }
+        .onChange(of: model.pollingRates) { _ in load() }
+        .onDisappear { monitor.stop() }
+    }
+    private var selectedRate: Int {
+        model.pollingRates.isEmpty ? 0 : model.pollingRates[max(0, min(model.pollingRates.count - 1, Int(index.rounded())))]
+    }
+    private func load() {
+        index = Double(model.pollingRates.firstIndex(of: model.polling ?? 0) ?? 0)
+    }
+    private func save() {
+        guard model.polling != nil, selectedRate != model.polling else { return }
+        model.setPolling(selectedRate)
     }
 }
 
@@ -445,6 +588,86 @@ struct ZoneEditor: View {
     }
 }
 
+struct DockLightingEditor: View {
+    @EnvironmentObject var model: SerpentisModel
+    @LocalState private var effect: DockEffect = .spectrum
+    @LocalState private var color: Color = .green
+    @LocalState private var brightness = 50.0
+    @LocalState private var batteryPalette = DockBatteryPalette.defaults
+    @LocalState private var dirty = false
+
+    var body: some View {
+        GroupBox("Mouse Dock Pro") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 18) {
+                    Picker("Effect", selection: Binding(get: { effect }, set: { effect = $0; dirty = true })) {
+                        ForEach(DockEffect.allCases, id: \.self) { item in Text(item.rawValue).tag(item) }
+                    }.frame(width: 250)
+                    if effect.usesColor {
+                        ColorPicker("Color", selection: Binding(get: { color }, set: { color = $0; dirty = true }), supportsOpacity: false)
+                    }
+                    Spacer()
+                }
+                HStack {
+                    Text("Brightness")
+                    Slider(value: Binding(get: { brightness }, set: { brightness = $0; dirty = true }), in: 0...100).frame(maxWidth: 260)
+                    Text("\(Int(brightness))%").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    Spacer()
+                    Button("Refresh") { model.refresh(.dockLighting) }.disabled(model.busy > 0)
+                    Button("Apply to Dock") { apply() }.buttonStyle(.borderedProminent)
+                        .disabled(model.busy > 0 || model.dockLight == nil)
+                }
+                if effect == .battery {
+                    HStack(spacing: 16) {
+                        ForEach(0..<4, id: \.self) { index in
+                            ColorPicker(DockBatteryPalette.labels[index], selection: Binding(
+                                get: { colorValue(batteryPalette.colors[index]) },
+                                set: { batteryPalette.set(index, color: rgb($0)); dirty = true }), supportsOpacity: false)
+                        }
+                    }
+                    HStack {
+                        Button("Reset Colors to Default") {
+                            batteryPalette = .defaults
+                            model.resetDockBatteryColors()
+                        }
+                        Spacer()
+                        Text("Defaults: Red → Orange → Yellow → Green").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text(model.dockBatteryEnabled ? model.dockBatteryStatus : "Apply to enable battery colors. Updated about once a minute while Serpentis runs.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.dockLight == nil {
+                    Text("Dock lighting could not be read. Click Refresh to retry.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(10)
+        }
+        .onAppear { load() }
+        .onChange(of: model.dockLight) { _ in if !dirty { load() } }
+        .onChange(of: model.dockBatteryPalette) { palette in batteryPalette = palette }
+    }
+    private func load() {
+        batteryPalette = model.dockBatteryPalette
+        guard let light = model.dockLight else { return }
+        if model.dockBatteryEnabled { effect = .battery }
+        else if let current = DockEffect.decode(light) { effect = current }
+        brightness = (Double(model.dockBatteryEnabled ? model.dockBatteryBrightness : light.brightness) / 255 * 100).rounded()
+        if let c = light.color { color = Color(.sRGB, red: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255, opacity: 1) }
+    }
+    private func colorValue(_ c: RGB) -> Color {
+        Color(.sRGB, red: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255, opacity: 1)
+    }
+    private func rgb(_ color: Color) -> RGB {
+        let c = NSColor(color).usingColorSpace(.sRGB) ?? .green
+        func byte(_ v: CGFloat) -> UInt8 { UInt8(max(0, min(255, (v * 255).rounded()))) }
+        return RGB(r: byte(c.redComponent), g: byte(c.greenComponent), b: byte(c.blueComponent))
+    }
+    private func apply() {
+        dirty = false
+        model.setDockLight(effect, color: rgb(color), percent: brightness, palette: batteryPalette)
+    }
+}
+
 struct LightingPreview: View {
     @EnvironmentObject var model: SerpentisModel
     func fill(_ z: Zone) -> AnyShapeStyle {
@@ -455,11 +678,8 @@ struct LightingPreview: View {
     }
     var body: some View {
         HStack(spacing: 40) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 50).stroke(Color.primary.opacity(0.25), lineWidth: 1.5).frame(width: 110, height: 180)
-                Capsule().fill(fill(.scrollWheel)).frame(width: 18, height: 36).offset(y: -55)
-                Image(systemName: "seal.fill").font(.system(size: 30)).foregroundStyle(fill(.logo)).offset(y: 40)
-            }
+            NagaIllustration(wheel: fill(.scrollWheel), logo: fill(.logo))
+                .scaleEffect(0.65).frame(width: 156, height: 208)
             VStack(spacing: 5) {
                 ForEach(0..<4, id: \.self) { _ in
                     HStack(spacing: 5) { ForEach(0..<3, id: \.self) { _ in RoundedRectangle(cornerRadius: 4).fill(fill(.sideButtons)).frame(width: 20, height: 20) } }
@@ -476,14 +696,17 @@ struct LightingView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                PaneHeader(title: "Lighting", subtitle: "The Naga V3 Pro has three lighting zones.")
-                LightingPreview()
-                Toggle("Use the same lighting for all zones", isOn: $linked)
-                if linked {
-                    ZoneEditor(title: "All Zones", zones: Zone.allCases)
-                } else {
-                    ForEach(Zone.allCases, id: \.self) { z in ZoneEditor(title: z.name, zones: [z]) }
+                PaneHeader(title: "Lighting", subtitle: "Mouse zones and connected dock lighting.")
+                if model.connected && !model.asleep && model.loadedOnce {
+                    LightingPreview()
+                    Toggle("Use the same lighting for all mouse zones", isOn: $linked)
+                    if linked {
+                        ZoneEditor(title: "All Mouse Zones", zones: Zone.allCases)
+                    } else {
+                        ForEach(Zone.allCases, id: \.self) { z in ZoneEditor(title: z.name, zones: [z]) }
+                    }
                 }
+                if model.dockAvailable { DockLightingEditor() }
             }.padding(24)
         }
     }
