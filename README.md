@@ -22,7 +22,7 @@ Razer's Mac software doesn't support the Naga V3 Pro. Serpentis is a small, free
 - **Battery** — level in the menu bar, charging indicator, low-battery notification.
 - **Power** — sleep timer and low-power mode threshold.
 - **Profiles** — save and switch DPI / polling / lighting setups.
-- Works over the **USB cable** and the **wireless receiver**. Menu-bar icon for quick changes, plus a full settings window.
+- Works over the **USB cable** the **wireless receiver**, and a paired **Mouse Dock Pro**. Menu-bar icon for quick changes, plus a full settings window.
 
 ## Supported hardware
 
@@ -30,6 +30,7 @@ Razer's Mac software doesn't support the Naga V3 Pro. Serpentis is a small, free
 |---|---|
 | Razer Naga V3 Pro (cable, USB ID 1532:00E7) | ✅ Tested |
 | Razer Naga V3 Pro (wireless receiver, 1532:00E8) | ✅ Tested |
+| Razer Naga V3 Pro via Mouse Dock Pro (1532:00A4) | ✅ Tested |
 | Razer Naga V3 Pro over Bluetooth | ❓ Not tested |
 | Other Naga models | ❓ Not yet — see *Help wanted* below |
 

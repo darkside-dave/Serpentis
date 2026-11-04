@@ -7,6 +7,9 @@ Everything here was verified on a Naga V3 Pro (firmware 1.01) from macOS, or dec
 - Vendor ID `0x1532`. Product ID `0x00E7` = USB cable, `0x00E8` = wireless receiver.
 - Settings use the HID interface with a **90-byte feature report** (usage page 0x01, usage 0x03), report ID 0.
 - Send with SET_REPORT (feature), read the answer with GET_REPORT (feature). Retry while status is `0x01` (busy).
+- Mouse Dock Pro uses product ID `0x00A4` and a 90-byte feature report on usage page `0x01`, usage `0x02`. Mouse commands retain transaction `0x1F`; dock identity uses `00:BF`, size `0x1F`, transaction `0x3F`.
+- The dock identity reply contains a slot count, then `[availability, PID high, PID low]` for each slot. Only the first slot is used as the relay target. Serpentis checks for a Naga V3 Pro PID before enabling controls, repeats this read every three seconds, and checks again before every settings write. A stored PID remains present while the mouse sleeps.
+- Dock relay and slot-query references: [razerd protocol](https://github.com/GregDuhamel/razerd/blob/main/src/protocol.rs) and [OpenRazer dock relay implementation](https://github.com/openrazer/openrazer/pull/2817). Local read-only verification confirmed paired PID `0x00E8`, battery, DPI and button-assignment replies.
 - If both the cable and the receiver are connected, talk to the cable (`0x00E7`); the receiver will reject commands.
 
 ## Report layout (90 bytes)

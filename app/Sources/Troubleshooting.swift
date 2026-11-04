@@ -3,7 +3,15 @@ import SwiftUI
 import IOKit
 import IOKit.hid
 
-enum DiagnosticConnection: String, Codable { case disconnected, cable, wireless }
+enum DiagnosticConnection: String, Codable { case disconnected, cable, wireless, dock
+    var label: String {
+        switch self {
+        case .disconnected: return "No supported Naga detected"
+        case .cable: return "USB cable"
+        case .wireless: return "Wireless receiver"
+        case .dock: return "Mouse Dock Pro"
+        }
+    } }
 enum DiagnosticPermission: String, Codable { case allowed, denied, notDetermined }
 enum MouseUtility: String, Codable, CaseIterable {
     case karabiner = "Karabiner-Elements", steerMouse = "SteerMouse"
@@ -40,8 +48,8 @@ enum TroubleshootingIssue: String, CaseIterable, Identifiable {
         switch self {
         case .buttons:
             return ["Click the test field below and press a button with a keyboard assignment. Raw input and typed text are checked separately.",
-                    "Quit other mouse utilities. In Karabiner, check every Naga entry, including any entry shown as both a keyboard and mouse.",
-                    "If raw input appears but no text is typed, quit Serpentis, turn the mouse off, unplug the receiver and wait 10 seconds. Reconnect it, switch the mouse to 2.4 GHz mode, and test in TextEdit before reopening Serpentis.",
+                    "Quit other mouse utilities. In Karabiner, check every Naga entry, including any entry shown as both a keyboard and mouse. When using Mouse Dock Pro, check its entries too.",
+                    "If raw input appears but no text is typed, quit Serpentis, turn the mouse off, unplug the receiver or Mouse Dock Pro and wait 10 seconds. Reconnect it, switch the mouse to 2.4 GHz mode, and test in TextEdit before reopening Serpentis.",
                     "Try the USB cable with the receiver unplugged. If USB works and wireless does not, include that result in your issue.",
                     "For keypad-only failures, check Mouse Keys in Accessibility → Pointer Control and try a regular letter assignment."]
         case .connection:
@@ -168,10 +176,11 @@ final class TroubleshootingController: ObservableObject {
                     func number(_ key: String) -> Int? {
                         (IORegistryEntryCreateCFProperty(device, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber)?.intValue
                     }
-                    if number(kIOHIDVendorIDKey) == kRazerVID, let product = number(kIOHIDProductIDKey), kNagaPIDs[product] != nil {
+                    if number(kIOHIDVendorIDKey) == kRazerVID, let product = number(kIOHIDProductIDKey), NagaDockRegistry.supports(vendor: kRazerVID, product: product, location: number(kIOHIDLocationIDKey) ?? 0) {
                         detectedUtilities.formUnion(Self.connectedUtilities(device))
                         if product == 0xE7 { connection = .cable }
-                        else if connection != .cable { connection = .wireless }
+                        else if product == 0xE8 && connection != .cable { connection = .wireless }
+                        else if connection == .disconnected { connection = .dock }
                         if number(kIOHIDPrimaryUsagePageKey) == 1 && number(kIOHIDPrimaryUsageKey) == 6 {
                             keyboards += 1
                             if !Self.hasEventDriver(device) { missing += 1 }
@@ -205,7 +214,7 @@ final class TroubleshootingController: ObservableObject {
             return
         }
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, 0)
-        let matches = kNagaPIDs.keys.sorted().flatMap { product in
+        let matches = NagaTransport.products.sorted().flatMap { product in
             [2, 6].map { usage in [kIOHIDVendorIDKey: kRazerVID, kIOHIDProductIDKey: product,
                                   kIOHIDPrimaryUsagePageKey: 1, kIOHIDPrimaryUsageKey: usage] }
         }
@@ -220,6 +229,9 @@ final class TroubleshootingController: ObservableObject {
             let amount = IOHIDValueGetIntegerValue(value)
             guard DiagnosticInput.description(page: page, usage: usage, value: amount) != nil else { return }
             let device = IOHIDElementGetDevice(element)
+            let product = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+            let location = (IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? Int) ?? 0
+            guard NagaDockRegistry.supports(vendor: kRazerVID, product: product, location: location) else { return }
             var id: UInt64 = 0
             guard IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(device), &id) == KERN_SUCCESS,
                   let description = controller.testState.record(device: id, page: page, usage: usage, value: amount) else { return }
@@ -283,7 +295,7 @@ struct TroubleshootingView: View {
                 if let report = diagnostics.report {
                     GroupBox("Connection and permissions") {
                         VStack(alignment: .leading, spacing: 10) {
-                            row("Connection", report.connection == .disconnected ? "No supported Naga detected" : report.connection == .cable ? "USB cable" : "Wireless receiver", ok: report.connection != .disconnected)
+                            row("Connection", report.connection.label, ok: report.connection != .disconnected)
                             row("Input Monitoring", report.inputMonitoring == .allowed ? "Allowed" : "Permission needed for the button test", ok: report.inputMonitoring == .allowed)
                             row("Accessibility", report.accessibility ? "Allowed" : "Needed when using scroll inversion", ok: report.accessibility || !input.invertScrolling)
                             row("Keyboard input", report.keyboardInterfaces == 0 ? "No keyboard interface detected" : report.keyboardInterfacesWithoutDriver > 0 ? "A keyboard interface has no macOS input driver. Try a clean reconnect." : "macOS keyboard drivers attached", ok: report.keyboardInterfaces > 0 && report.keyboardInterfacesWithoutDriver == 0)

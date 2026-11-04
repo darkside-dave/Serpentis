@@ -11,6 +11,35 @@ func service(_ id: UInt64, _ acceleration: Int?, vendor: Int = kRazerVID, produc
     MouseInputService(id: id, vendor: vendor, product: product, pointer: pointer, acceleration: acceleration)
 }
 
+// A dock is a shared receiver, not a mouse identity.
+expect(NagaTransport.settingsUsage(0xA4) == 2 && NagaTransport.settingsUsage(0xE8) == 3, "Use the dock's mouse collection for feature reports")
+expect([0xA4, 0xE8, 0xE7].sorted { NagaTransport.priority($0) < NagaTransport.priority($1) } == [0xE7, 0xE8, 0xA4], "Prefer cable, then dedicated receiver, then dock")
+var slotReply = [UInt8](repeating: 0, count: 90)
+slotReply[0] = 2; slotReply[1] = 0x3F; slotReply[5] = 31; slotReply[7] = 0xBF
+slotReply[8] = 2; slotReply[9] = 1; slotReply[10] = 0; slotReply[11] = 0xE8
+slotReply[12] = 0; slotReply[13] = 0xFF; slotReply[14] = 0xFF
+expect(NagaTransport.pairedNaga(slotReply), "Recognize the Naga in the dock relay's first slot")
+slotReply[9] = 0
+expect(NagaTransport.pairedNaga(slotReply), "Keep a sleeping paired Naga recognized")
+slotReply[11] = 0xAB
+expect(!NagaTransport.pairedNaga(slotReply), "Reject docks paired with another mouse")
+slotReply[13] = 0; slotReply[14] = 0xE8
+expect(!NagaTransport.pairedNaga(slotReply), "A Naga in an uncharacterized slot must not authorize the relay")
+slotReply[11] = 0xE8; slotReply[5] = 4
+expect(!NagaTransport.pairedNaga(slotReply), "Reject truncated slot payloads")
+slotReply[5] = 31; slotReply[0] = 1
+expect(!NagaTransport.pairedNaga(slotReply), "Busy replies must not authorize a dock")
+expect(!NagaTransport.pairedNaga(Array(slotReply.prefix(12))), "Reject short reports")
+var dockService = service(90, 32768, product: kMouseDockProPID)
+dockService.location = 123
+expect(!dockService.isNaga, "A dock PID alone must not authorize pointer changes")
+NagaDockRegistry.set(123, supported: true)
+expect(dockService.isNaga && !NagaDockRegistry.supports(vendor: kRazerVID, product: kMouseDockProPID, location: 124), "Authorize only interfaces at the verified dock location")
+expect(!NagaDockRegistry.supports(vendor: 0x05AC, product: kMouseDockProPID, location: 123), "Require the Razer vendor even at an authorized location")
+NagaDockRegistry.set(123, supported: false)
+expect(!dockService.isNaga, "Revoke dock authorization on identity loss or removal")
+expect(DiagnosticConnection.dock.label == "Mouse Dock Pro", "Identify dock connections in troubleshooting")
+
 // Physical control IDs and factory assignments must match the protocol inventory.
 let ring = SerpentisModel.slot(0x39)
 expect(ring.name == "Ring / Pinky Button", "Slot 0x39 must select the ring-finger control")

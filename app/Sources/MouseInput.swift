@@ -13,7 +13,8 @@ struct MouseInputService {
     var linearScaling: Int = 0
     var resolution: Int = 400 * 65536
 
-    var isNaga: Bool { vendor == kRazerVID && kNagaPIDs[product] != nil }
+    var location: Int = 0
+    var isNaga: Bool { NagaDockRegistry.supports(vendor: vendor, product: product, location: location) }
     var pointerValues: [String: Int]? {
         guard let acceleration = acceleration else { return nil }
         return [PointerSensitivity.accelerationKey: acceleration, PointerSensitivity.linearKey: linearScaling,
@@ -50,14 +51,15 @@ final class NagaInputSystem {
                 (IOHIDServiceClientCopyProperty(service, key as CFString) as? NSNumber)?.intValue
             }
             guard number(kIOHIDVendorIDKey) == kRazerVID,
-                  let product = number(kIOHIDProductIDKey), kNagaPIDs[product] != nil,
+                  let product = number(kIOHIDProductIDKey),
+                  NagaDockRegistry.supports(vendor: kRazerVID, product: product, location: number(kIOHIDLocationIDKey) ?? 0),
                   let id = IOHIDServiceClientGetRegistryID(service) as? NSNumber else { return nil }
             let type = IOHIDServiceClientCopyProperty(service, "HIDPointerAccelerationType" as CFString) as? String
             let isPointer = IOHIDServiceClientConformsTo(service, 1, 2) != 0 || IOHIDServiceClientConformsTo(service, 1, 1) != 0
             return MouseInputService(id: id.uint64Value, vendor: kRazerVID, product: product,
                                      pointer: isPointer && type == "HIDMouseAcceleration", acceleration: number("HIDMouseAcceleration"),
                                      linearScaling: number(PointerSensitivity.linearKey) ?? 0,
-                                     resolution: number(PointerSensitivity.resolutionKey) ?? 400 * 65536)
+                                     resolution: number(PointerSensitivity.resolutionKey) ?? 400 * 65536, location: number(kIOHIDLocationIDKey) ?? 0)
         }
     }
 
@@ -71,7 +73,8 @@ final class NagaInputSystem {
             (IOHIDServiceClientGetRegistryID($0) as? NSNumber)?.uint64Value == id
         }), (IOHIDServiceClientCopyProperty(service, kIOHIDVendorIDKey as CFString) as? NSNumber)?.intValue == kRazerVID,
               let product = IOHIDServiceClientCopyProperty(service, kIOHIDProductIDKey as CFString) as? NSNumber,
-              kNagaPIDs[product.intValue] != nil else { return false }
+              NagaDockRegistry.supports(vendor: kRazerVID, product: product.intValue,
+                  location: (IOHIDServiceClientCopyProperty(service, kIOHIDLocationIDKey as CFString) as? NSNumber)?.intValue ?? 0) else { return false }
         let key = name as CFString
         guard IOHIDServiceClientSetProperty(service, key, NSNumber(value: value)) else { return false }
         return (IOHIDServiceClientCopyProperty(service, key) as? NSNumber)?.intValue == value

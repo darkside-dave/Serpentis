@@ -8,10 +8,12 @@ struct MouseRefreshRequest: Equatable {
         static let lighting = Fields(rawValue: 1 << 2)
         static let power = Fields(rawValue: 1 << 3)
         static let firmware = Fields(rawValue: 1 << 4)
+        static let identity = Fields(rawValue: 1 << 5)
     }
     var fields: Fields = []
     var buttonIDs: Set<UInt8> = []
     var isEmpty: Bool { fields.isEmpty && buttonIDs.isEmpty }
+    static let identity = Self(fields: .identity)
     static let battery = Self(fields: .battery)
     static let performance = Self(fields: .performance)
     static let lighting = Self(fields: .lighting)
@@ -45,6 +47,7 @@ struct RefreshQueue {
 }
 
 struct MouseSnapshot {
+    var supported = false
     var battery: Int?
     var charging = false
     var firmware: String?
@@ -57,6 +60,8 @@ struct MouseSnapshot {
     var lowPowerRaw: UInt8?
 
     init(mouse: RazerMouse, request: MouseRefreshRequest) {
+        supported = mouse.supportsNaga()
+        guard supported else { return }
         if request.fields.contains(.battery) {
             battery = mouse.battery()
             guard battery != nil else { return }

@@ -15,6 +15,7 @@ final class SerpentisModel: ObservableObject {
     @Published var selectedSection: PaneSection? = .buttons
     @Published var connected = false
     @Published var connection = ""
+    @Published var connectionIssue = ""
     @Published var asleep = false
     @Published var battery: Int?
     @Published var charging = false
@@ -71,8 +72,9 @@ final class SerpentisModel: ObservableObject {
         busy = 0; loadedOnce = false; firmware = ""
         dpi = nil; stages = nil; polling = nil; lights = [:]; buttons = [:]
         sleepSeconds = nil; lowPowerRaw = nil; battery = nil; charging = false
-        connected = app?.mouse != nil; asleep = false
+        connected = app?.mouse != nil && app?.mouse?.productID != kMouseDockProPID; asleep = false
         connection = app?.mouse?.connectionName ?? ""
+        connectionIssue = app?.openFailed == true ? "macOS blocked device access. Enable Serpentis in Input Monitoring, then quit and reopen it." : ""
     }
 
     func refresh(_ request: MouseRefreshRequest = .all) {
@@ -95,7 +97,7 @@ final class SerpentisModel: ObservableObject {
                 guard self.generation == generation, self.app?.mouse === mouse else { return }
                 self.busy -= 1
                 self.apply(snapshot, request: request)
-                if !self.loadedOnce, snapshot.battery != nil, request != .all {
+                if !self.loadedOnce, snapshot.supported, (snapshot.battery != nil || request == .identity), request != .all {
                     _ = self.refreshQueue.enqueue(.all)
                 }
                 if let next = self.refreshQueue.finish() { self.read(next, mouse: mouse, generation: generation) }
@@ -104,7 +106,20 @@ final class SerpentisModel: ObservableObject {
     }
 
     private func apply(_ value: MouseSnapshot, request: MouseRefreshRequest) {
-        if !connected { connected = true }
+        if let mouse = app?.mouse, mouse.productID == kMouseDockProPID {
+            NagaDockRegistry.set(mouse.locationID, supported: value.supported)
+            app?.input.devicesChanged()
+        }
+        if connected != value.supported { connected = value.supported }
+        guard value.supported else {
+            connectionIssue = "Mouse Dock Pro is connected, but it did not confirm a paired Naga V3 Pro. Wake the mouse and click Refresh."
+            loadedOnce = false; buttons = [:]; lights = [:]; battery = nil
+            dpi = nil; stages = nil; firmware = ""; polling = nil
+            sleepSeconds = nil; lowPowerRaw = nil; charging = false
+            app?.buttonCache = [:]; app?.lights = [:]; app?.updateBattery(nil, charging: false)
+            return
+        }
+        if !connectionIssue.isEmpty { connectionIssue = "" }
         if request.fields.contains(.battery) {
             if battery != value.battery { battery = value.battery }
             if charging != value.charging { charging = value.charging }
@@ -143,7 +158,7 @@ final class SerpentisModel: ObservableObject {
         let generation = self.generation
         busy += 1
         queue.async {
-            let ok = work(mouse)
+            let ok = mouse.supportsNaga() && work(mouse)
             DispatchQueue.main.async {
                 guard self.generation == generation, self.app?.mouse === mouse else { return }
                 self.busy -= 1

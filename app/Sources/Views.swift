@@ -40,8 +40,8 @@ struct ContentView: View {
                     } else if model.selectedSection == .input {
                         InputSettingsView()
                     } else if !model.connected {
-                        Placeholder(icon: "cable.connector", title: "Naga V3 Pro not connected",
-                                    text: "Plug in the mouse with the cable or the wireless receiver.")
+                        Placeholder(icon: "cable.connector", title: model.connectionIssue.isEmpty ? "Naga V3 Pro not connected" : "Mouse connection unavailable",
+                                    text: model.connectionIssue.isEmpty ? "Connect the USB cable, wireless receiver, or Mouse Dock Pro paired with a Naga V3 Pro." : model.connectionIssue)
                     } else if model.asleep {
                         Placeholder(icon: "moon.zzz", title: "Mouse is asleep", text: "Move the mouse to wake it, then click Refresh.")
                     } else if !model.loadedOnce {

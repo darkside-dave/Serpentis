@@ -4,7 +4,37 @@ import IOKit
 import IOKit.hid
 
 let kRazerVID = 0x1532
+let kMouseDockProPID = 0x00A4
 let kNagaPIDs: [Int: String] = [0x00E7: "Cable", 0x00E8: "Wireless"]
+
+enum NagaTransport {
+    static let products = Array(kNagaPIDs.keys) + [kMouseDockProPID]
+    static func settingsUsage(_ product: Int) -> Int { product == kMouseDockProPID ? 2 : 3 }
+    static func priority(_ product: Int) -> Int { product == 0xE7 ? 0 : product == 0xE8 ? 1 : 2 }
+
+    static func pairedNaga(_ report: [UInt8]) -> Bool {
+        guard report.count == 90, report[0] == 2, report[1] == 0x3F,
+              report[6] == 0, report[7] == 0xBF, report[8] > 0,
+              report[8] <= 26, Int(report[5]) >= 1 + 3 * Int(report[8]) else { return false }
+        return kNagaPIDs[Int(report[10]) << 8 | Int(report[11])] != nil
+    }
+}
+
+// Dock interfaces share a USB location; authorize them only after checking the paired PID.
+enum NagaDockRegistry {
+    private static let lock = NSLock()
+    private static var locations: Set<Int> = []
+    static func set(_ location: Int, supported: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if supported && location != 0 { locations.insert(location) } else { locations.remove(location) }
+    }
+    static func supports(vendor: Int, product: Int, location: Int = 0) -> Bool {
+        guard vendor == kRazerVID else { return false }
+        if kNagaPIDs[product] != nil { return true }
+        lock.lock(); defer { lock.unlock() }
+        return product == kMouseDockProPID && location != 0 && locations.contains(location)
+    }
+}
 
 enum Zone: UInt8, CaseIterable, Codable {
     case scrollWheel = 0x01, logo = 0x04, sideButtons = 0x05
@@ -49,21 +79,23 @@ private func lo(_ v: Int) -> UInt8 { UInt8(v & 0xFF) }
 final class RazerMouse {
     let device: IOHIDDevice
     let productID: Int
+    let locationID: Int
     private let txn: UInt8 = 0x1F
     private let lock = NSLock()
-    var connectionName: String { kNagaPIDs[productID] ?? "USB" }
+    var connectionName: String { productID == kMouseDockProPID ? "Mouse Dock Pro" : kNagaPIDs[productID] ?? "USB" }
 
     init?(device: IOHIDDevice) {
         self.device = device
+        self.locationID = (IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? Int) ?? 0
         self.productID = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int) ?? 0
         guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else { return nil }
     }
     deinit { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
 
     // MARK: - Protocol
-    private func makeReport(_ cls: UInt8, _ cmd: UInt8, _ size: UInt8, _ args: [UInt8]) -> [UInt8] {
+    private func makeReport(_ cls: UInt8, _ cmd: UInt8, _ size: UInt8, _ args: [UInt8], transaction: UInt8) -> [UInt8] {
         var r = [UInt8](repeating: 0, count: 90)
-        r[1] = txn; r[5] = size; r[6] = cls; r[7] = cmd
+        r[1] = transaction; r[5] = size; r[6] = cls; r[7] = cmd
         for (i, a) in args.prefix(80).enumerated() { r[8 + i] = a }
         var crc: UInt8 = 0
         for i in 2..<88 { crc ^= r[i] }
@@ -74,14 +106,31 @@ final class RazerMouse {
     /// Sends a command and returns the reply if the mouse answered "OK".
     func query(_ cls: UInt8, _ cmd: UInt8, size: UInt8, args: [UInt8] = []) -> [UInt8]? {
         lock.lock(); defer { lock.unlock() }
-        var buf = makeReport(cls, cmd, size, args)
+        if productID == kMouseDockProPID, cmd < 0x80, !checkPairedMouse() { return nil }
+        return exchange(cls, cmd, size: size, args: args, transaction: txn)
+    }
+
+    func supportsNaga() -> Bool {
+        guard productID == kMouseDockProPID else { return kNagaPIDs[productID] != nil }
+        lock.lock(); defer { lock.unlock() }
+        return checkPairedMouse()
+    }
+
+    private func checkPairedMouse() -> Bool {
+        guard let reply = exchange(0, 0xBF, size: 0x1F, args: [], transaction: 0x3F) else { return false }
+        return NagaTransport.pairedNaga(reply)
+    }
+
+    private func exchange(_ cls: UInt8, _ cmd: UInt8, size: UInt8, args: [UInt8], transaction: UInt8) -> [UInt8]? {
+        var buf = makeReport(cls, cmd, size, args, transaction: transaction)
         guard IOHIDDeviceSetReport(device, kIOHIDReportTypeFeature, 0, &buf, buf.count) == kIOReturnSuccess else { return nil }
         usleep(45_000)
         for _ in 0..<20 {
             var out = [UInt8](repeating: 0, count: 90)
             var len = CFIndex(90)
             guard IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, 0, &out, &len) == kIOReturnSuccess else { return nil }
-            if out[0] == 0x01 || out[6] != cls || out[7] != cmd { usleep(25_000); continue }
+            if out[0] == 0x00 || out[0] == 0x01 || out[1] != transaction || out[6] != cls || out[7] != cmd { usleep(25_000); continue }
+            guard len == 90 else { return nil }
             return out[0] == 0x02 ? out : nil
         }
         return nil

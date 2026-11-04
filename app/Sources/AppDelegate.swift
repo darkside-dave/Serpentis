@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var charging = false
     var warnedLow = false
     var timer: Timer?
+    private var dockTimer: Timer?
     var colorZones: [Zone] = []
     var colorKind: EffectKind = .staticColor
     var buttonCache: [UInt8: [UInt8]] = [:]
@@ -69,9 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func startHID() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatchingMultiple(manager, kNagaPIDs.keys.sorted().map {
+        IOHIDManagerSetDeviceMatchingMultiple(manager, NagaTransport.products.sorted().map {
             [kIOHIDVendorIDKey: kRazerVID, kIOHIDProductIDKey: $0,
-             kIOHIDPrimaryUsagePageKey: 1, kIOHIDPrimaryUsageKey: 3]
+             kIOHIDPrimaryUsagePageKey: 1, kIOHIDPrimaryUsageKey: NagaTransport.settingsUsage($0)]
         } as CFArray)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         let cb: IOHIDDeviceCallback = { ctx, _, _, _ in
@@ -94,12 +95,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let candidates = devs.filter {
             let feat = (IOHIDDeviceGetProperty($0, kIOHIDMaxFeatureReportSizeKey as CFString) as? Int) ?? 0
             let pid = (IOHIDDeviceGetProperty($0, kIOHIDProductIDKey as CFString) as? Int) ?? 0
-            return feat >= 90 && kNagaPIDs[pid] != nil
+            return feat >= 90 && NagaTransport.products.contains(pid)
         }
-        let preferred = candidates.first {
-            (IOHIDDeviceGetProperty($0, kIOHIDProductIDKey as CFString) as? Int) == 0x00E7
-        } ?? candidates.first
+        let preferred = candidates.sorted {
+            let a = (IOHIDDeviceGetProperty($0, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+            let b = (IOHIDDeviceGetProperty($1, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+            return NagaTransport.priority(a) < NagaTransport.priority(b)
+        }.first
         if let cur = mouse, let p = preferred, CFEqual(cur.device, p) { return }
+        if let previous = mouse, previous.productID == kMouseDockProPID {
+            NagaDockRegistry.set(previous.locationID, supported: false)
+        }
+        dockTimer?.invalidate(); dockTimer = nil
         mouse = nil
         openFailed = false
         lights = [:]
@@ -109,6 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if let p = preferred {
             if let m = RazerMouse(device: p) {
                 mouse = m
+                if m.productID == kMouseDockProPID {
+                    dockTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+                        self?.model.refresh(.identity)
+                    }
+                    dockTimer?.tolerance = 1
+                }
             } else {
                 openFailed = true
             }
@@ -185,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 menu.addItem(label("Naga found, but macOS blocked access"))
                 menu.addItem(item("Open Input Monitoring Settings…", #selector(openPrivacy)))
             } else {
-                menu.addItem(label("Naga V3 Pro not connected"))
+                menu.addItem(label(mouse?.productID == kMouseDockProPID ? "Mouse Dock Pro found — waiting for a paired Naga V3 Pro" : "Naga V3 Pro not connected"))
             }
             addFooter(menu); return
         }

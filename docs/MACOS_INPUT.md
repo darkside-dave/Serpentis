@@ -22,7 +22,7 @@ full client is unavailable, custom sensitivity is disabled and the earlier
 negative-acceleration override remains available through the simple client.
 This creation function is undocumented and may change in future macOS versions.
 
-Only services with vendor `0x1532`, product `0x00E7` or `0x00E8`, mouse/pointer
+Only services with vendor `0x1532`, product `0x00E7` or `0x00E8` (or `0x00A4` at a USB location whose dock reports a paired Naga V3 Pro), mouse/pointer
 usage and acceleration type `HIDMouseAcceleration` are changed. Both cable and
 receiver services are handled. With acceleration disabled, the service receives
 `HIDUseLinearScalingMouseAcceleration = 1` and `HIDMouseAcceleration = gain` in

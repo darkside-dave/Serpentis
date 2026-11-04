@@ -10,6 +10,8 @@ button; lighting, power and DPI actions refresh their corresponding fields.
 A full refresh is available from the window's Refresh button. Results from an
 old device session are discarded after a connection change.
 
+When Mouse Dock Pro is connected, a separate three-second timer reads its local paired-device table. This does not query the mouse over RF. The timer stops when the dock settings interface is removed.
+
 Pointer monitoring uses a three-second timer while an override, scroll inversion
 or pending restoration needs it. The timer stops at default settings. Connection
 changes and wake notifications also refresh the input service state. Timers have
