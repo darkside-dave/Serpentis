@@ -101,10 +101,7 @@ extension AppDelegate {
     var autoWoWKey: String { "autoLayoutWoW" }
     var autoOtherKey: String { "autoLayoutOther" }
 
-    func loadButtons() {
-        guard let m = mouse else { return }
-        for id in RazerMouse.sideButtonIDs + RazerMouse.otherButtons.map({ $0.id }) { if let a = m.button(id) { buttonCache[id] = a } }
-    }
+    func loadButtons() { model.refresh(.buttons) }
 
     func sideButtonsMenu() -> NSMenu {
         let menu = NSMenu()
@@ -158,14 +155,7 @@ extension AppDelegate {
         return menu
     }
 
-    func writeButton(_ args: [UInt8]) {
-        guard let m = mouse else { return }
-        if m.setButton(args) {
-            buttonCache[args[1]] = m.button(args[1]) ?? args
-        } else {
-            message("The mouse didn't accept that", "Nothing was changed. If you're on wireless, try with the cable plugged in and tell Claude.")
-        }
-    }
+    func writeButton(_ args: [UInt8]) { model.setButton(args) }
 
     @objc func buttonDefault(_ s: NSMenuItem) { writeButton(RazerMouse.defaultArgs(s.tag)) }
 
@@ -198,11 +188,11 @@ extension AppDelegate {
     }
 
     @objc func resetAllButtons() {
-        guard let m = mouse else { return }
-        var failed = 0
-        for i in 0..<12 { if !m.setButton(RazerMouse.defaultArgs(i)) { failed += 1 } }
-        loadButtons()
-        if failed > 0 { message("\(failed) button(s) didn't reset", "Try again with the cable plugged in.") }
+        model.run("Some side buttons did not reset.", refresh: .buttons) { mouse in
+            var ok = true
+            for index in 0..<12 { if !mouse.setButton(RazerMouse.defaultArgs(index)) { ok = false } }
+            return ok
+        }
     }
 
     // MARK: Layouts
@@ -216,7 +206,7 @@ extension AppDelegate {
     }
 
     @objc func saveLayout() {
-        guard mouse != nil else { return }
+        guard mouse != nil, model.loadedOnce, model.busy == 0 else { return }
         let a = NSAlert(); a.messageText = "Save Button Layout"; a.informativeText = "Name for the current 12 side-button assignments:"
         let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24)); a.accessoryView = f
         a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
@@ -225,17 +215,14 @@ extension AppDelegate {
         guard a.runModal() == .alertFirstButtonReturn else { return }
         let name = f.stringValue.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
-        loadButtons()
-        var list = RazerMouse.sideButtonIDs.enumerated().map { buttonCache[$0.element] ?? RazerMouse.defaultArgs($0.offset) }
-        list += RazerMouse.otherButtons.map { buttonCache[$0.id] ?? $0.factory }
-        var all = loadLayouts(); all[name] = list; storeLayouts(all)
+        model.saveLayout(name)
     }
 
-    func applyLayout(_ list: [[UInt8]], completion: (() -> Void)? = nil) {
-        guard let m = mouse else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            for args in list where args.count == 10 { m.setButton(args) }
-            DispatchQueue.main.async { self.loadButtons(); completion?() }
+    func applyLayout(_ list: [[UInt8]]) {
+        model.run("Some buttons in that layout were not confirmed.", refresh: .buttons) { mouse in
+            var ok = true
+            for args in list where args.count == 10 { if !mouse.setButton(args) { ok = false } }
+            return ok
         }
     }
 
