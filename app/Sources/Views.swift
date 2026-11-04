@@ -3,15 +3,17 @@ import SwiftUI
 import AppKit
 
 enum PaneSection: String, CaseIterable, Identifiable {
-    case buttons = "Buttons", performance = "Performance", lighting = "Lighting", power = "Power", profiles = "Profiles", about = "About"
+    case buttons = "Buttons", performance = "Performance", input = "Pointer & Scrolling", lighting = "Lighting", power = "Power", profiles = "Profiles", troubleshooting = "Troubleshooting", about = "About"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .buttons: return "square.grid.3x3"
         case .performance: return "speedometer"
+        case .input: return "cursorarrow.motionlines"
         case .lighting: return "lightbulb"
         case .power: return "battery.75"
         case .profiles: return "person.crop.square"
+        case .troubleshooting: return "wrench.and.screwdriver"
         case .about: return "info.circle"
         }
     }
@@ -19,11 +21,10 @@ enum PaneSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var model: SerpentisModel
-    @LocalState private var section: PaneSection? = .buttons
 
     var body: some View {
         NavigationSplitView {
-            List(PaneSection.allCases, selection: $section) { s in
+            List(PaneSection.allCases, selection: $model.selectedSection) { s in
                 Label(s.rawValue, systemImage: s.icon).tag(s)
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 180)
@@ -32,8 +33,12 @@ struct ContentView: View {
                 StatusBar()
                 Divider()
                 Group {
-                    if section == .about {
+                    if model.selectedSection == .about {
                         AboutView()
+                    } else if model.selectedSection == .troubleshooting {
+                        TroubleshootingView()
+                    } else if model.selectedSection == .input {
+                        InputSettingsView()
                     } else if !model.connected {
                         Placeholder(icon: "cable.connector", title: "Naga V3 Pro not connected",
                                     text: "Plug in the mouse with the cable or the wireless receiver.")
@@ -42,12 +47,14 @@ struct ContentView: View {
                     } else if !model.loadedOnce {
                         ProgressView("Reading settings from the mouse…").frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        switch section ?? .buttons {
+                        switch model.selectedSection ?? .buttons {
                         case .buttons: ButtonsView()
                         case .performance: PerformanceView()
+                        case .input: InputSettingsView()
                         case .lighting: LightingView()
                         case .power: PowerView()
                         case .profiles: ProfilesView()
+                        case .troubleshooting: TroubleshootingView()
                         case .about: AboutView()
                         }
                     }
@@ -131,24 +138,23 @@ struct PadButton: View {
 struct MouseTopView: View {
     @Binding var selected: UInt8
     var body: some View {
-        let s = SerpentisModel.slots
-        ZStack {
-            RoundedRectangle(cornerRadius: 75).fill(Color.primary.opacity(0.04))
-                .overlay(RoundedRectangle(cornerRadius: 75).stroke(Color.primary.opacity(0.25), lineWidth: 1.5))
-                .frame(width: 180, height: 290).position(x: 90, y: 145)
-            Path { p in p.move(to: CGPoint(x: 90, y: 4)); p.addLine(to: CGPoint(x: 90, y: 40)) }
-                .stroke(Color.primary.opacity(0.25), lineWidth: 1)
-            Path { p in p.move(to: CGPoint(x: 90, y: 104)); p.addLine(to: CGPoint(x: 90, y: 115)) }
-                .stroke(Color.primary.opacity(0.25), lineWidth: 1)
-            Text("Left").font(.caption).foregroundStyle(.secondary).position(x: 42, y: 30)
-            Text("Right").font(.caption).foregroundStyle(.secondary).position(x: 138, y: 30)
-            PadButton(slot: s[13], selected: $selected, w: 28, h: 46).position(x: 52, y: 72)
-            PadButton(slot: s[12], selected: $selected, w: 36, h: 62).position(x: 90, y: 72)
-            PadButton(slot: s[14], selected: $selected, w: 28, h: 46).position(x: 128, y: 72)
-            PadButton(slot: s[15], selected: $selected, w: 46, h: 30).position(x: 90, y: 136)
-            Text("Top view").font(.caption2).foregroundStyle(.secondary).position(x: 90, y: 255)
+        VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                NagaIllustration()
+                NagaButtonTarget(id: 0x03, title: "3", selected: $selected, width: 24, height: 54).position(x: 116, y: 65)
+                NagaButtonTarget(id: 0x34, title: "◀", selected: $selected, width: 22, height: 28).position(x: 86, y: 65)
+                NagaButtonTarget(id: 0x35, title: "▶", selected: $selected, width: 22, height: 28).position(x: 146, y: 65)
+                NagaButtonTarget(id: 0x0B, title: "D+", selected: $selected, width: 24, height: 30)
+                    .rotationEffect(.degrees(12)).position(x: 40, y: 61)
+                NagaButtonTarget(id: 0x0C, title: "D−", selected: $selected, width: 24, height: 30)
+                    .rotationEffect(.degrees(8)).position(x: 34, y: 99)
+                NagaButtonTarget(id: 0x6A, title: "Mode", selected: $selected, width: 38, height: 20).position(x: 116, y: 128)
+                NagaButtonTarget(id: 0x80, title: "Rear", selected: $selected, width: 38, height: 20).position(x: 116, y: 153)
+                NagaButtonTarget(id: 0x39, title: "Ring", selected: $selected, width: 74, height: 24)
+                    .rotationEffect(.degrees(90)).position(x: 213, y: 197)
+            }.frame(width: 240, height: 320)
+            Text("Naga V3 Pro · top view").font(.caption).foregroundStyle(.secondary)
         }
-        .frame(width: 180, height: 290)
     }
 }
 
@@ -260,7 +266,7 @@ struct LayoutsBox: View {
                     Button("Save Current Buttons") {
                         let n = name.trimmingCharacters(in: .whitespaces)
                         if !n.isEmpty { model.saveLayout(n); name = "" }
-                    }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy > 0)
                     Spacer()
                     Button("Reset All Buttons to Default") { model.resetAllButtons() }
                 }
@@ -316,6 +322,62 @@ struct ButtonsView: View {
 }
 
 // MARK: - Performance
+
+struct InputSettingsView: View {
+    @EnvironmentObject var input: MouseInputController
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                PaneHeader(title: "Pointer & Scrolling", subtitle: "Fine-tune your Naga on this Mac. Your trackpad and other mice keep their existing settings.")
+                GroupBox("Pointer") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Disable mouse acceleration", isOn: Binding(get: { input.disableAcceleration }, set: { input.setDisableAcceleration($0) }))
+                            .toggleStyle(.checkbox)
+                        Text("Keep pointer movement consistent regardless of how quickly you move the mouse.")
+                            .foregroundStyle(.secondary)
+                        Divider().padding(.vertical, 4)
+                        HStack(spacing: 12) {
+                            Text("Sensitivity").font(.headline)
+                            Spacer()
+                            Text(String(format: "%.2f×", PointerSensitivity.gain(input.sensitivity))).foregroundStyle(.secondary).monospacedDigit()
+                            TextField("Sensitivity", value: Binding(get: { input.sensitivity }, set: { input.setSensitivity($0) }), format: .number)
+                                .frame(width: 72).multilineTextAlignment(.trailing).disabled(!input.canAdjustSensitivity)
+                            Button("Reset") { input.setSensitivity(1000) }.disabled(input.sensitivity == 1000)
+                        }
+                        HStack(spacing: 12) {
+                            Text("Slower").font(.caption).foregroundStyle(.secondary)
+                            Slider(value: Binding(get: { Double(input.sensitivity) }, set: { input.setSensitivity(Int($0.rounded())) }), in: 0...2000, step: 10)
+                                .accessibilityLabel("Pointer sensitivity").disabled(!input.canAdjustSensitivity)
+                            Text("Faster").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("1000 = normal sensitivity · 0 = minimum. With acceleration disabled, 2000 = 2× pointer speed. Hardware DPI stays unchanged.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(input.accelerationStatus).font(.callout)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }
+                GroupBox("Scrolling") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Invert scrolling", isOn: Binding(get: { input.invertScrolling }, set: { input.setInvertScrolling($0) }))
+                            .toggleStyle(.checkbox).disabled(!input.canIdentifyScrollDevices)
+                        Text("Reverse the wheel and horizontal tilt relative to your macOS scroll direction.")
+                            .foregroundStyle(.secondary)
+                        Text(input.scrollingStatus).font(.callout)
+                        if input.needsAccessibility {
+                            Button("Open Accessibility Settings…") { input.openAccessibility() }
+                            Text("Enable Serpentis, then return here. If macOS asks you to reopen the app, do so.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }
+                Label("Keep Serpentis running", systemImage: "menubar.rectangle").font(.headline)
+                Text("These settings are saved on this Mac and applied while Serpentis runs. Use Start at Login in the menu bar to apply them each time you sign in. Quitting Serpentis restores the prior pointer settings and stops scroll inversion.")
+                    .foregroundStyle(.secondary)
+                Text("Quit SteerMouse or other mouse utilities before enabling these options so they don't compete for the same settings.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }.padding(24)
+        }.onAppear { input.refresh() }
+    }
+}
 
 struct PerformanceView: View {
     @EnvironmentObject var model: SerpentisModel
@@ -455,11 +517,8 @@ struct LightingPreview: View {
     }
     var body: some View {
         HStack(spacing: 40) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 50).stroke(Color.primary.opacity(0.25), lineWidth: 1.5).frame(width: 110, height: 180)
-                Capsule().fill(fill(.scrollWheel)).frame(width: 18, height: 36).offset(y: -55)
-                Image(systemName: "seal.fill").font(.system(size: 30)).foregroundStyle(fill(.logo)).offset(y: 40)
-            }
+            NagaIllustration(wheel: fill(.scrollWheel), logo: fill(.logo))
+                .scaleEffect(0.65).frame(width: 156, height: 208)
             VStack(spacing: 5) {
                 ForEach(0..<4, id: \.self) { _ in
                     HStack(spacing: 5) { ForEach(0..<3, id: \.self) { _ in RoundedRectangle(cornerRadius: 4).fill(fill(.sideButtons)).frame(width: 20, height: 20) } }

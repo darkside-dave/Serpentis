@@ -27,6 +27,8 @@ let brightnessLevels: [(String, UInt8)] = [("Off", 0), ("25%", 64), ("50%", 128)
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let model = SerpentisModel()
+    let input = MouseInputController()
+    let troubleshooting = TroubleshootingController()
     var window: NSWindow?
     var statusItem: NSStatusItem!
     let menu = NSMenu()
@@ -42,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var colorKind: EffectKind = .staticColor
     var buttonCache: [UInt8: [UInt8]] = [:]
     var lastAutoLayout: String?
+    private var pendingRescan: DispatchWorkItem?
 
     // MARK: - Startup
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -53,23 +56,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         model.app = self
         migrateFromNagaControl()
         setupMainMenu()
+        input.start()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         startHID()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appActivated(_:)),
                                                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshBattery() }
+        timer?.tolerance = 10
         updateTitle()
         if !CommandLine.arguments.contains("--hidden") { DispatchQueue.main.async { self.openWindow() } }
     }
 
     func startHID() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, [kIOHIDVendorIDKey: kRazerVID] as CFDictionary)
+        IOHIDManagerSetDeviceMatchingMultiple(manager, kNagaPIDs.keys.sorted().map {
+            [kIOHIDVendorIDKey: kRazerVID, kIOHIDProductIDKey: $0,
+             kIOHIDPrimaryUsagePageKey: 1, kIOHIDPrimaryUsageKey: 3]
+        } as CFArray)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         let cb: IOHIDDeviceCallback = { ctx, _, _, _ in
             guard let ctx = ctx else { return }
             let me = Unmanaged<AppDelegate>.fromOpaque(ctx).takeUnretainedValue()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { me.rescan() }
+            me.pendingRescan?.cancel()
+            let work = DispatchWorkItem { [weak me] in me?.rescan() }
+            me.pendingRescan = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
         }
         IOHIDManagerRegisterDeviceMatchingCallback(manager, cb, ctx)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, cb, ctx)
@@ -98,28 +109,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if let p = preferred {
             if let m = RazerMouse(device: p) {
                 mouse = m
-                reloadLights()
-                loadButtons()
-                refreshBattery()
             } else {
                 openFailed = true
             }
         }
+        model.deviceChanged()
         updateTitle()
         model.refresh()
+        input.devicesChanged()
     }
 
-    func reloadLights() {
-        guard let m = mouse else { return }
-        for z in Zone.allCases { if let l = m.light(z) { lights[z] = l } }
-    }
+    func reloadLights() { model.refresh(.lighting) }
 
     // MARK: - Battery / status bar
-    func refreshBattery() {
-        guard let m = mouse else { updateTitle(); return }
-        battery = m.battery()
-        charging = m.isCharging() ?? false
-        model.battery = battery; model.charging = charging
+    func refreshBattery() { model.refresh(.battery) }
+
+    func updateBattery(_ value: Int?, charging: Bool) {
+        battery = value
+        self.charging = charging
         if let b = battery {
             if charging || b >= 20 { warnedLow = false }
             if b < 15 && !charging && !warnedLow {
@@ -157,10 +164,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: - Build menu each time it opens
     func menuNeedsUpdate(_ menu: NSMenu) {
+        model.refresh(.menu)
+        buildMenu(menu)
+    }
+
+    func buildMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(item("Open Serpentis…", #selector(openWindow)))
+        menu.addItem(item("Troubleshooting…", #selector(openTroubleshooting)))
         menu.addItem(.separator())
-        guard let m = mouse else {
+        let inputMenu = NSMenu()
+        inputMenu.addItem(item("Disable Mouse Acceleration", #selector(toggleAcceleration), checked: input.disableAcceleration))
+        inputMenu.addItem(item("Invert Scrolling", #selector(toggleScrollInversion), checked: input.invertScrolling))
+        inputMenu.addItem(label("Naga only · while Serpentis is running"))
+        if input.needsAccessibility { inputMenu.addItem(item("Open Accessibility Settings…", #selector(openInputAccessibility))) }
+        menu.addItem(submenu("Pointer & Scrolling", inputMenu))
+        menu.addItem(.separator())
+        guard model.connected else {
             if openFailed {
                 menu.addItem(label("Naga found, but macOS blocked access"))
                 menu.addItem(item("Open Input Monitoring Settings…", #selector(openPrivacy)))
@@ -169,18 +189,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             addFooter(menu); return
         }
-        refreshBattery()
-        menu.addItem(label("Razer Naga V3 Pro — \(m.connectionName)"))
+        menu.addItem(label("Razer Naga V3 Pro — \(model.connection)"))
         guard let b = battery else {
-            menu.addItem(label("Mouse asleep or out of range — move it to wake"))
+            menu.addItem(label(model.busy > 0 ? "Reading mouse settings…" : "Mouse asleep or out of range — move it to wake"))
             addFooter(menu); return
         }
         menu.addItem(label("Battery: \(b)%\(charging ? " (charging)" : "")"))
         menu.addItem(.separator())
 
         // DPI
-        let cur = m.dpi()
-        let stages = m.dpiStages()
+        let cur = model.dpi
+        let stages = model.stages
         menu.addItem(label("DPI: \(cur.map { $0.x == $0.y ? "\($0.x)" : "\($0.x) × \($0.y)" } ?? "?")"))
         if let st = stages {
             for (i, s) in st.stages.enumerated() {
@@ -193,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
 
         // Polling
-        let rate = m.pollingRate()
+        let rate = model.polling
         let pm = NSMenu()
         for hz in [125, 500, 1000] { pm.addItem(item("\(hz) Hz", #selector(setRate(_:)), tag: hz, checked: rate == hz)) }
         menu.addItem(submenu("Polling Rate: \(rate.map { "\($0) Hz" } ?? "?")", pm))
@@ -229,7 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func addFooter(_ menu: NSMenu) {
         menu.addItem(.separator())
         menu.addItem(item("Start at Login", #selector(toggleLogin), checked: FileManager.default.fileExists(atPath: launchAgentURL.path)))
-        menu.addItem(label("Serpentis \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")\(mouse?.firmware().map { " · firmware \($0)" } ?? "")"))
+        menu.addItem(label("Serpentis \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")\((model.firmware.isEmpty ? nil : model.firmware).map { " · firmware \($0)" } ?? "")"))
         let q = NSMenuItem(title: "Quit Serpentis", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(q)
     }
@@ -265,13 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     // MARK: - DPI actions
-    @objc func selectStage(_ sender: NSMenuItem) {
-        guard let m = mouse, var st = m.dpiStages(), sender.tag >= 1, sender.tag <= st.stages.count else { return }
-        st.active = sender.tag
-        m.setDPIStages(st)
-        let s = st.stages[sender.tag - 1]
-        m.setDPI(s.x, s.y)
-    }
+    @objc func selectStage(_ sender: NSMenuItem) { model.selectStage(sender.tag) }
 
     func askNumber(_ title: String, _ info: String, _ initial: String) -> Int? {
         let a = NSAlert(); a.messageText = title; a.informativeText = info
@@ -291,17 +304,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func customDPI() {
-        guard let m = mouse else { return }
-        guard let v = askNumber("Custom DPI", "Enter a DPI from 100 to 30000. This lasts until you press the DPI button or pick a step.", "\(m.dpi()?.x ?? 1600)") else { return }
-        let v2 = max(100, min(30000, v))
-        if !m.setDPI(v2, v2) { message("The mouse didn't accept that", "Try again, or move the mouse to wake it.") }
+        guard mouse != nil else { return }
+        guard let value = askNumber("Custom DPI", "Enter a DPI from 100 to 30000.", "\(model.dpi?.x ?? 1600)") else { return }
+        model.setDPI(value, value)
     }
 
     @objc func editStages() {
-        guard let m = mouse, let cur = m.dpiStages() else { return }
+        guard mouse != nil, let cur = model.stages else { return }
         let a = NSAlert()
         a.messageText = "DPI Steps"
-        a.informativeText = "The DPI button under the scroll wheel cycles through these.\nLeave a box empty to remove that step. Range: 100–30000."
+        a.informativeText = "The top-left DPI buttons cycle through these.\nLeave a box empty to remove that step. Range: 100–30000."
         let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
         var fields: [NSTextField] = []
         for i in 0..<5 {
@@ -319,35 +331,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard a.runModal() == .alertFirstButtonReturn else { return }
         let vals = fields.compactMap { Int($0.stringValue.trimmingCharacters(in: .whitespaces)) }.map { max(100, min(30000, $0)) }
         guard !vals.isEmpty else { message("Need at least one step", "Nothing was changed."); return }
-        let new = DPIStageSet(active: max(1, min(cur.active, vals.count)), stages: vals.map { DPIStage(x: $0, y: $0) })
-        let sent = m.setDPIStages(new)
-        let back = m.dpiStages()
-        if sent && back == new {
-            let s = new.stages[new.active - 1]; m.setDPI(s.x, s.y)
-            message("DPI steps saved", "Steps: " + vals.map(String.init).joined(separator: " / "))
-        } else {
-            message("The mouse didn't confirm the new steps", "Your old steps should still be in place. Please tell Claude: sent=\(sent), read back=\(back.map { "\($0)" } ?? "nothing").")
-        }
+        model.saveStages(vals, active: cur.active)
     }
 
-    @objc func setRate(_ sender: NSMenuItem) { mouse?.setPollingRate(sender.tag) }
+    @objc func setRate(_ sender: NSMenuItem) { model.setPolling(sender.tag) }
 
     // MARK: - Lighting actions
     @objc func applyLight(_ sender: NSMenuItem) {
-        guard let m = mouse, let a = sender.representedObject as? LightAction else { return }
-        for z in a.zones { apply(m, z, a.kind, a.color, a.brightness) }
-        reloadLights()
-    }
-
-    func apply(_ m: RazerMouse, _ z: Zone, _ kind: EffectKind, _ color: RGB?, _ brightness: UInt8?) {
-        if let b = brightness { m.setBrightness(z, b); return }
-        switch kind {
-        case .spectrum: m.setSpectrum(z)
-        case .staticColor: if let c = color { m.setStatic(z, c) }
-        case .breathing: if let c = color { m.setBreathing(z, c) }
-        default: break
+        guard let action = sender.representedObject as? LightAction else { return }
+        if let brightness = action.brightness {
+            model.setBrightness(action.zones, Double(brightness) / 255 * 100)
+        } else {
+            model.setEffect(action.zones, action.kind, action.color ?? RGB(r: 255, g: 255, b: 255))
         }
-        if (lights[z]?.brightness ?? 0) == 0 { m.setBrightness(z, 128) }
     }
 
     @objc func customColor(_ sender: NSMenuItem) {
@@ -372,11 +368,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func applyPanelColor() {
-        guard let m = mouse, let c = NSColorPanel.shared.color.usingColorSpace(.sRGB) else { return }
+        guard mouse != nil, let c = NSColorPanel.shared.color.usingColorSpace(.sRGB) else { return }
         func byte(_ v: CGFloat) -> UInt8 { UInt8(max(0, min(255, (v * 255).rounded()))) }
         let rgb = RGB(r: byte(c.redComponent), g: byte(c.greenComponent), b: byte(c.blueComponent))
-        for z in colorZones { apply(m, z, colorKind, rgb, nil) }
-        reloadLights()
+        model.setEffect(colorZones, colorKind, rgb)
     }
 
     // MARK: - Profiles
@@ -391,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func saveProfile() {
-        guard let m = mouse else { return }
+        guard mouse != nil, model.loadedOnce, model.busy == 0 else { return }
         let a = NSAlert(); a.messageText = "Save Profile"; a.informativeText = "Name for the current DPI steps, polling rate and lighting:"
         let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24)); a.accessoryView = f
         a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
@@ -400,22 +395,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard a.runModal() == .alertFirstButtonReturn else { return }
         let name = f.stringValue.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
-        reloadLights()
-        var ls: [String: ZoneLight] = [:]
-        for (z, l) in lights { ls["\(z.rawValue)"] = l }
-        var all = loadProfiles()
-        all[name] = Profile(stages: m.dpiStages(), pollingRate: m.pollingRate(), lights: ls)
-        storeProfiles(all)
+        model.saveProfile(name)
     }
 
     @objc func loadProfile(_ sender: NSMenuItem) {
-        guard let m = mouse, let name = sender.representedObject as? String, let p = loadProfiles()[name] else { return }
-        if let st = p.stages, m.setDPIStages(st), st.active >= 1, st.active <= st.stages.count {
-            let s = st.stages[st.active - 1]; m.setDPI(s.x, s.y)
-        }
-        if let r = p.pollingRate { m.setPollingRate(r) }
-        for z in Zone.allCases { if let l = p.lights["\(z.rawValue)"] { m.restore(z, l) } }
-        reloadLights()
+        guard let name = sender.representedObject as? String else { return }
+        model.loadProfile(name)
     }
 
     @objc func deleteProfile(_ sender: NSMenuItem) {
@@ -445,6 +430,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") { NSWorkspace.shared.open(u) }
     }
 
+    @objc func toggleAcceleration() { input.setDisableAcceleration(!input.disableAcceleration) }
+    @objc func toggleScrollInversion() { input.setInvertScrolling(!input.invertScrolling) }
+    @objc func openInputAccessibility() { input.openAccessibility() }
+    func applicationWillTerminate(_ notification: Notification) { troubleshooting.stopTest(); input.stop() }
+
     // MARK: - Window
     @objc func openWindow() {
         if window == nil {
@@ -453,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                              backing: .buffered, defer: false)
             w.title = "Serpentis"
             w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(rootView: ContentView().environmentObject(model))
+            w.contentViewController = NSHostingController(rootView: ContentView().environmentObject(model).environmentObject(input).environmentObject(troubleshooting))
             w.setContentSize(NSSize(width: 980, height: 720))
             w.center()
             w.setFrameAutosaveName("SerpentisMain")
@@ -463,19 +453,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-        model.refresh()
+        if model.busy == 0 { model.refresh() }
+    }
+    @objc func openTroubleshooting() {
+        model.selectedSection = .troubleshooting
+        openWindow()
     }
     func windowWillClose(_ notification: Notification) {
+        troubleshooting.stopTest()
         NSApp.setActivationPolicy(.accessory)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openWindow(); return true
     }
-    func menuDidClose(_ menu: NSMenu) {
-        guard window?.isVisible == true else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.model.refresh() }
-    }
-
     func setupMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)

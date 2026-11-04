@@ -19,13 +19,10 @@ fi
 {
   echo "Building Serpentis... $(date)"
   echo "(this takes about a minute)"
-  rm -rf build && mkdir -p build/Serpentis.app/Contents/MacOS
-  if ! swiftc -O -swift-version 5 Sources/*.swift -o build/Serpentis.app/Contents/MacOS/Serpentis; then
+  if ! bash build.sh; then
     echo "BUILD FAILED - please open an issue on GitHub and attach app/build-log.txt"
     exit 1
   fi
-  cp Info.plist build/Serpentis.app/Contents/Info.plist
-  codesign --force -s - build/Serpentis.app && echo "Signed (local signature)"
   pkill -x Serpentis 2>/dev/null; sleep 1
   rm -rf /Applications/Serpentis.app
   cp -R build/Serpentis.app /Applications/ && echo "Installed to /Applications/Serpentis.app"

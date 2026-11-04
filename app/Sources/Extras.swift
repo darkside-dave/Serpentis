@@ -54,17 +54,17 @@ extension AppDelegate {
     }
 
     @objc func resetOtherButtons() {
-        guard let m = mouse else { return }
-        var failed = 0
-        for b in RazerMouse.otherButtons { if !m.setButton(b.factory) { failed += 1 } }
-        loadButtons()
-        if failed > 0 { message("\(failed) button(s) didn't reset", "Try again with the cable plugged in.") }
+        model.run("Some buttons did not reset.", refresh: .buttons) { mouse in
+            var ok = true
+            for button in RazerMouse.otherButtons { if !mouse.setButton(button.factory) { ok = false } }
+            return ok
+        }
     }
 
     // MARK: Power
     func powerMenu() -> NSMenu {
         let menu = NSMenu()
-        let sleep = mouse?.sleepTimer()
+        let sleep = model.sleepSeconds
         let sm = NSMenu()
         for mins in [1, 2, 3, 5, 10, 15] {
             sm.addItem(item("\(mins) minute\(mins == 1 ? "" : "s")", #selector(setSleep(_:)), tag: mins * 60, checked: sleep == mins * 60))
@@ -72,7 +72,7 @@ extension AppDelegate {
         let sleepTitle = sleep.map { $0 % 60 == 0 ? "\($0 / 60) min" : "\($0) sec" } ?? "?"
         menu.addItem(submenu("Sleep When Idle: \(sleepTitle)", sm))
 
-        let lp = mouse?.lowPowerThreshold()
+        let lp = model.lowPowerRaw
         let lm = NSMenu()
         for pct in [5, 10, 15, 20, 25] {
             let raw = UInt8((Double(pct) * 255 / 100).rounded())
@@ -85,21 +85,13 @@ extension AppDelegate {
         return menu
     }
 
-    @objc func setSleep(_ s: NSMenuItem) {
-        guard let m = mouse else { return }
-        if !(m.setSleepTimer(s.tag) && m.sleepTimer() == s.tag) { message("The mouse didn't accept that", "Nothing was changed.") }
-    }
-
-    @objc func setLowPower(_ s: NSMenuItem) {
-        guard let m = mouse else { return }
-        let raw = UInt8((Double(s.tag) * 255 / 100).rounded())
-        if !(m.setLowPowerThreshold(raw) && m.lowPowerThreshold() == raw) { message("The mouse didn't accept that", "Nothing was changed.") }
-    }
+    @objc func setSleep(_ sender: NSMenuItem) { model.setSleep(sender.tag) }
+    @objc func setLowPower(_ sender: NSMenuItem) { model.setLowPower(sender.tag) }
 
     // MARK: Separate X / Y DPI
     @objc func customDPIXY() {
-        guard let m = mouse else { return }
-        let cur = m.dpi() ?? DPIStage(x: 1600, y: 1600)
+        guard mouse != nil else { return }
+        let cur = model.dpi ?? DPIStage(x: 1600, y: 1600)
         let a = NSAlert()
         a.messageText = "Custom DPI"
         a.informativeText = "X is left–right speed, Y is up–down speed (100–30000).\nThis lasts until you press the DPI button or pick a step."
@@ -121,8 +113,6 @@ extension AppDelegate {
               let x = Int(fx.stringValue.trimmingCharacters(in: .whitespaces)),
               let y = Int(fy.stringValue.trimmingCharacters(in: .whitespaces)) else { return }
         let cx = max(100, min(30000, x)), cy = max(100, min(30000, y))
-        if !(m.setDPI(cx, cy) && m.dpi() == DPIStage(x: cx, y: cy)) {
-            message("The mouse didn't confirm that", "It may only accept certain steps. Try again or tell Claude.")
-        }
+        model.setDPI(cx, cy)
     }
 }

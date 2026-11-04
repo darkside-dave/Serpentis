@@ -1,4 +1,4 @@
-// RazerMouse.swift - talks to the Razer Naga V3 Pro using the commands verified in Phases 1-2.
+// RazerMouse.swift - Naga V3 Pro feature-report protocol.
 import Foundation
 import IOKit
 import IOKit.hid
@@ -194,15 +194,21 @@ final class RazerMouse {
     @discardableResult
     func setButton(_ args: [UInt8]) -> Bool {
         guard args.count == 10, let r = query(0x02, 0x0C, size: 0x0A, args: args) else { return false }
-        return Array(r[8..<18]) == args
+        return Array(r[8..<18]) == args && button(args[1]) == args
     }
 
-    // MARK: - Other buttons (found by the discovery test)
+    // MARK: - Body controls
+    // Physical IDs follow the Naga V3 Pro press-validated map linked in docs/PROTOCOL.md.
+    // Factory assignments are listed in docs/PROTOCOL.md.
     static let otherButtons: [(name: String, id: UInt8, factory: [UInt8])] = [
         ("Wheel Click", 0x03, [0x01, 0x03, 0x00, 0x01, 0x01, 0x03, 0, 0, 0, 0]),
         ("Wheel Tilt Left", 0x34, [0x01, 0x34, 0x00, 0x0E, 0x01, 0x68, 0x00, 0x14, 0, 0]),
         ("Wheel Tilt Right", 0x35, [0x01, 0x35, 0x00, 0x0E, 0x01, 0x69, 0x00, 0x14, 0, 0]),
-        ("Button Behind Wheel", 0x39, [0x01, 0x39, 0x00, 0x0C, 0x01, 0x01, 0, 0, 0, 0]),
+        ("Ring / Pinky Button", 0x39, [0x01, 0x39, 0x00, 0x0C, 0x01, 0x39, 0, 0, 0, 0]),
+        ("Top-left Front (DPI Up)", 0x0B, [0x01, 0x0B, 0x00, 0x06, 0x01, 0x01, 0, 0, 0, 0]),
+        ("Top-left Rear (DPI Down)", 0x0C, [0x01, 0x0C, 0x00, 0x06, 0x01, 0x02, 0, 0, 0, 0]),
+        ("Front Button Behind Wheel", 0x6A, [0x01, 0x6A, 0x00, 0x12, 0x01, 0x01, 0, 0, 0, 0]),
+        ("Rear Button Behind Wheel", 0x80, [0x01, 0x80, 0x00, 0x00, 0x01, 0x00, 0, 0, 0, 0]),
     ]
 
     // MARK: - Power

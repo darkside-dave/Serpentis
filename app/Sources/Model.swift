@@ -12,6 +12,7 @@ struct ButtonSlot: Identifiable, Hashable {
 
 final class SerpentisModel: ObservableObject {
     weak var app: AppDelegate?
+    @Published var selectedSection: PaneSection? = .buttons
     @Published var connected = false
     @Published var connection = ""
     @Published var asleep = false
@@ -33,6 +34,8 @@ final class SerpentisModel: ObservableObject {
 
     private let queue = DispatchQueue(label: "serpentis.io")
     private var pendingLight: DispatchWorkItem?
+    private var refreshQueue = RefreshQueue()
+    private var generation = 0
 
     static let slots: [ButtonSlot] = {
         var s: [ButtonSlot] = []
@@ -40,8 +43,9 @@ final class SerpentisModel: ObservableObject {
             s.append(ButtonSlot(id: RazerMouse.sideButtonIDs[i], name: "Side Button \(i + 1)", short: "\(i + 1)",
                                 factory: RazerMouse.defaultArgs(i), defaultText: "Types \(hidKeyName(RazerMouse.defaultKeys[i]))"))
         }
-        let shorts = ["Click", "◀", "▶", "Top"]
-        let texts = ["Middle click", "Scroll left", "Scroll right", "Built-in function (wheel mode)"]
+        let shorts = ["Click", "◀", "▶", "Ring", "DPI+", "DPI−", "Mode", "Rear"]
+        let texts = ["Middle click", "Scroll left", "Scroll right", "Built-in ring-finger function",
+                     "DPI stage up", "DPI stage down", "Cycle wheel mode", "Disabled"]
         for (i, b) in RazerMouse.otherButtons.enumerated() {
             s.append(ButtonSlot(id: b.id, name: b.name, short: shorts[i], factory: b.factory, defaultText: texts[i]))
         }
@@ -61,69 +65,100 @@ final class SerpentisModel: ObservableObject {
     }
 
     // MARK: Refresh
-    func refresh() {
+    func deviceChanged() {
+        generation += 1
+        refreshQueue = RefreshQueue()
+        busy = 0; loadedOnce = false; firmware = ""
+        dpi = nil; stages = nil; polling = nil; lights = [:]; buttons = [:]
+        sleepSeconds = nil; lowPowerRaw = nil; battery = nil; charging = false
+        connected = app?.mouse != nil; asleep = false
+        connection = app?.mouse?.connectionName ?? ""
+    }
+
+    func refresh(_ request: MouseRefreshRequest = .all) {
         reloadNames()
-        guard let m = app?.mouse else {
-            connected = false; asleep = false; battery = nil
+        guard let mouse = app?.mouse else {
+            if connected { connected = false }
+            if asleep { asleep = false }
+            if battery != nil { battery = nil }
             return
         }
+        guard let next = refreshQueue.enqueue(request) else { return }
+        read(next, mouse: mouse, generation: generation)
+    }
+
+    private func read(_ request: MouseRefreshRequest, mouse: RazerMouse, generation: Int) {
         busy += 1
         queue.async {
-            let bat = m.battery()
-            if bat == nil {
-                DispatchQueue.main.async {
-                    self.busy -= 1; self.connected = true; self.asleep = true; self.connection = m.connectionName
-                }
-                return
-            }
-            let chg = m.isCharging() ?? false
-            let fw = m.firmware() ?? ""
-            let d = m.dpi(), st = m.dpiStages(), p = m.pollingRate()
-            var ls: [Zone: ZoneLight] = [:]
-            for z in Zone.allCases { if let l = m.light(z) { ls[z] = l } }
-            var bs: [UInt8: [UInt8]] = [:]
-            for s in Self.slots { if let a = m.button(s.id) { bs[s.id] = a } }
-            let sl = m.sleepTimer(), lp = m.lowPowerThreshold()
+            let snapshot = MouseSnapshot(mouse: mouse, request: request)
             DispatchQueue.main.async {
+                guard self.generation == generation, self.app?.mouse === mouse else { return }
                 self.busy -= 1
-                self.connected = true; self.asleep = false; self.connection = m.connectionName
-                self.battery = bat; self.charging = chg; self.firmware = fw
-                self.dpi = d; self.stages = st; self.polling = p
-                self.lights = ls; self.buttons = bs
-                self.sleepSeconds = sl; self.lowPowerRaw = lp
-                self.loadedOnce = true
-                self.app?.lights = ls
-                for (k, v) in bs { self.app?.buttonCache[k] = v }
-                self.app?.battery = bat; self.app?.charging = chg; self.app?.updateTitle()
+                self.apply(snapshot, request: request)
+                if !self.loadedOnce, snapshot.battery != nil, request != .all {
+                    _ = self.refreshQueue.enqueue(.all)
+                }
+                if let next = self.refreshQueue.finish() { self.read(next, mouse: mouse, generation: generation) }
             }
         }
+    }
+
+    private func apply(_ value: MouseSnapshot, request: MouseRefreshRequest) {
+        if !connected { connected = true }
+        if request.fields.contains(.battery) {
+            if battery != value.battery { battery = value.battery }
+            if charging != value.charging { charging = value.charging }
+            if asleep != (value.battery == nil) { asleep = value.battery == nil }
+            app?.updateBattery(value.battery, charging: value.charging)
+            guard value.battery != nil else { return }
+        }
+        if let v = value.firmware, firmware != v { firmware = v }
+        if request.fields.contains(.performance) {
+            if dpi != value.dpi { dpi = value.dpi }
+            if stages != value.stages { stages = value.stages }
+            if polling != value.polling { polling = value.polling }
+        }
+        if request.fields.contains(.lighting), lights != value.lights { lights = value.lights }
+        var merged = buttons
+        for (id, args) in value.buttons { merged[id] = args }
+        if buttons != merged { buttons = merged }
+        if request.fields.contains(.power) {
+            if sleepSeconds != value.sleepSeconds { sleepSeconds = value.sleepSeconds }
+            if lowPowerRaw != value.lowPowerRaw { lowPowerRaw = value.lowPowerRaw }
+        }
+        if request == .all, !loadedOnce { loadedOnce = true }
+        app?.lights = lights; app?.buttonCache = buttons
     }
 
     func reloadNames() {
-        layoutNames = (app?.loadLayouts().keys.sorted()) ?? []
-        profileNames = (app?.loadProfiles().keys.sorted()) ?? []
+        let layouts = (app?.loadLayouts().keys.sorted()) ?? []
+        let profiles = (app?.loadProfiles().keys.sorted()) ?? []
+        if layoutNames != layouts { layoutNames = layouts }
+        if profileNames != profiles { profileNames = profiles }
     }
 
-    /// Runs a mouse operation in the background, then refreshes everything.
-    func run(_ failure: String, _ work: @escaping (RazerMouse) -> Bool) {
-        guard let m = app?.mouse else { errorText = "The mouse isn't connected."; return }
+    /// Serializes setting changes with background reads.
+    func run(_ failure: String, refresh request: MouseRefreshRequest = .all, _ work: @escaping (RazerMouse) -> Bool) {
+        guard let mouse = app?.mouse else { errorText = "The mouse isn't connected."; return }
+        let generation = self.generation
         busy += 1
         queue.async {
-            let ok = work(m)
+            let ok = work(mouse)
             DispatchQueue.main.async {
+                guard self.generation == generation, self.app?.mouse === mouse else { return }
                 self.busy -= 1
                 if !ok { self.errorText = failure }
-                self.refresh()
+                self.refresh(request)
             }
         }
     }
 
     // MARK: Buttons
     func setButton(_ args: [UInt8]) {
-        run("The mouse didn't accept that button setting. Nothing was changed.") { $0.setButton(args) }
+        run("The mouse did not confirm the saved assignment. Check the button in Troubleshooting before retrying.", refresh: MouseRefreshRequest(buttonIDs: args.count > 1 ? [args[1]] : [])) { $0.setButton(args) }
     }
     func resetAllButtons() {
-        run("Some buttons didn't reset. Try again with the cable plugged in.") { m in
+        run("Some buttons didn't reset. Try again with the cable plugged in.", refresh: .buttons) { m in
             var ok = true
             for s in Self.slots { if !m.setButton(s.factory) { ok = false } }
             return ok
@@ -139,7 +174,7 @@ final class SerpentisModel: ObservableObject {
     }
     func loadLayout(_ name: String) {
         guard let list = app?.loadLayouts()[name] else { return }
-        run("Some buttons in that layout weren't accepted.") { m in
+        run("Some buttons in that layout weren't accepted.", refresh: .buttons) { m in
             var ok = true
             for a in list where a.count == 10 { if !m.setButton(a) { ok = false } }
             return ok
@@ -171,7 +206,7 @@ final class SerpentisModel: ObservableObject {
 
     // MARK: Performance
     func selectStage(_ n: Int) {
-        run("The mouse didn't accept that DPI step.") { m in
+        run("The mouse didn't accept that DPI step.", refresh: .performance) { m in
             guard var st = m.dpiStages(), n >= 1, n <= st.stages.count else { return false }
             st.active = n
             guard m.setDPIStages(st) else { return false }
@@ -181,7 +216,7 @@ final class SerpentisModel: ObservableObject {
     }
     func saveStages(_ values: [Int], active: Int) {
         let new = DPIStageSet(active: max(1, min(active, values.count)), stages: values.map { DPIStage(x: $0, y: $0) })
-        run("The mouse didn't confirm the new DPI steps. Your old steps should still be in place.") { m in
+        run("The mouse didn't confirm the new DPI steps. Your old steps should still be in place.", refresh: .performance) { m in
             guard m.setDPIStages(new), m.dpiStages() == new else { return false }
             let s = new.stages[new.active - 1]
             return m.setDPI(s.x, s.y)
@@ -189,14 +224,14 @@ final class SerpentisModel: ObservableObject {
     }
     func setDPI(_ x: Int, _ y: Int) {
         let cx = max(100, min(30000, x)), cy = max(100, min(30000, y))
-        run("The mouse didn't confirm that DPI.") { m in m.setDPI(cx, cy) && m.dpi() == DPIStage(x: cx, y: cy) }
+        run("The mouse didn't confirm that DPI.", refresh: .performance) { m in m.setDPI(cx, cy) && m.dpi() == DPIStage(x: cx, y: cy) }
     }
-    func setPolling(_ hz: Int) { run("The mouse didn't accept that polling rate.") { $0.setPollingRate(hz) } }
+    func setPolling(_ hz: Int) { run("The mouse didn't accept that polling rate.", refresh: .performance) { $0.setPollingRate(hz) } }
 
     // MARK: Lighting
     func setEffect(_ zones: [Zone], _ kind: EffectKind, _ color: RGB) {
         let before = lights
-        run("The mouse didn't accept that lighting change.") { m in
+        run("The mouse didn't accept that lighting change.", refresh: .lighting) { m in
             var ok = true
             for z in zones {
                 switch kind {
@@ -220,14 +255,14 @@ final class SerpentisModel: ObservableObject {
     }
     func setBrightness(_ zones: [Zone], _ percent: Double) {
         let v = UInt8(max(0, min(255, (percent / 100 * 255).rounded())))
-        run("The mouse didn't accept that brightness.") { m in zones.allSatisfy { m.setBrightness($0, v) } }
+        run("The mouse didn't accept that brightness.", refresh: .lighting) { m in zones.allSatisfy { m.setBrightness($0, v) } }
     }
 
     // MARK: Power
-    func setSleep(_ seconds: Int) { run("The mouse didn't accept that sleep time.") { m in m.setSleepTimer(seconds) && m.sleepTimer() == seconds } }
+    func setSleep(_ seconds: Int) { run("The mouse didn't accept that sleep time.", refresh: .power) { m in m.setSleepTimer(seconds) && m.sleepTimer() == seconds } }
     func setLowPower(_ percent: Int) {
         let raw = UInt8((Double(percent) * 255 / 100).rounded())
-        run("The mouse didn't accept that setting.") { m in m.setLowPowerThreshold(raw) && m.lowPowerThreshold() == raw }
+        run("The mouse didn't accept that setting.", refresh: .power) { m in m.setLowPowerThreshold(raw) && m.lowPowerThreshold() == raw }
     }
 
     // MARK: Profiles (stored in Serpentis)

@@ -49,7 +49,7 @@ Arguments: `[profile 0x01, button, layer 0x00, type, length, data…]`
 
 - **Type 0x02 keyboard**, data `[modifiers, HID key code]`. Modifier bits: 0x01 Ctrl, 0x02 Shift, 0x04 Alt, 0x08 GUI (⌘/Windows). Factory entries use length 0x01, Synapse writes 0x02; both work.
 - **Type 0x01 mouse button**, length 1, data `[button]`: 1 left, 2 right, 3 middle, 4 back, 5 forward, 9/10 wheel up/down.
-- Factory specials seen: type 0x0E (wheel tilt scroll, data `68/69 00 14`), type 0x0C (button behind the wheel), type 0x07, type 0x12.
+- Factory specials seen: type 0x0E (wheel tilt scroll, data `68/69 00 14`), type 0x0C (ring/pinky button, data `39`), type 0x06 (DPI up/down), type 0x07 (underside profile button), type 0x12 (front wheel-mode button).
 - The mouse echoes the arguments on success. There's no separate "save" step.
 - Note: Synapse's "reset to default" sends nothing for that button, so the old mapping stays in the mouse.
 
@@ -58,8 +58,25 @@ Arguments: `[profile 0x01, button, layer 0x00, type, length, data…]`
 | Side buttons 1–12 (12-button plate) | 0x40–0x4B |
 | Wheel click | 0x03 |
 | Wheel tilt left / right | 0x34 / 0x35 |
-| Button behind the wheel | 0x39 |
+| Ring / pinky button | 0x39 |
+| Top-left front / rear DPI buttons | 0x0B / 0x0C |
+| Front button behind wheel (wheel mode) | 0x6A |
+| Rear button behind wheel (disabled by default) | 0x80 |
 | Wheel up / down | 0x09 / 0x0A |
-| Other IDs that answer (likely other side plates / bottom buttons) | 0x04, 0x05, 0x0B, 0x0C, 0x0E, 0x50–0x55, 0x6A |
+| Other plate / underside IDs that answer | 0x04, 0x05, 0x0E, 0x50–0x55 |
+
+### Physical controls
+
+The ring/pinky control uses slot `0x39`; the front and rear controls behind the
+wheel use `0x6A` and `0x80`. The factory function blocks are `0C 01 39`,
+`12 01 01`, and `00 01 00`, respectively. The top-left DPI controls use
+`06 01 01` and `06 01 02`. The function blocks are padded with zeros to seven
+bytes when stored in the ten-byte assignment payload.
+
+These assignments match the
+[press-validated Naga V3 Pro button table published by OpenSnek](https://github.com/gh123man/OpenSnek/blob/main/captures/usb/2026-10-17-naga-v3-pro/README.md#button-table).
+Profile `0` reads the effective assignment; the app reads and writes the stored
+profile-1 bank. Saving a button requires both a matching command reply and a
+separate assignment readback.
 
 Unverified: Hypershift (probably layer byte 0x01), onboard profile slots, scroll-wheel mode, calibration.
