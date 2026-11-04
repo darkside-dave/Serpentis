@@ -19,6 +19,8 @@ Razer's Mac software doesn't support the Naga V3 Pro. Serpentis is a small, free
 - **Pointer & scrolling** — adjust sensitivity from 0–2000, disable mouse acceleration, and invert wheel / tilt scrolling for the Naga, independently of your trackpad and other mice. These Mac-side preferences apply while Serpentis runs; scroll inversion requires Accessibility permission.
 - **Troubleshooting** — check connection, driver and permission status, test button input, and copy a diagnostic report that excludes personal information and typed text.
 - **Lighting** — scroll wheel, logo and side panel: color cycle, solid color, breathing or off, with brightness.
+- **Scroll wheel** — tactile, free-spin and precision-tactile modes, plus Smart Reel under Pointer & Scrolling, when the mouse returns supported settings. Saves use a separate readback.
+- **Mouse Dock Pro** — independent dock brightness, solid color, breathing, color cycle and wave effects; battery colors with an editable red-to-green palette and reset; a polling slider up to 8000 Hz when supported by the paired mouse, plus an on-demand raw report-rate check.
 - **Battery** — level in the menu bar, charging indicator, low-battery notification.
 - **Power** — sleep timer and low-power mode threshold.
 - **Profiles** — save and switch DPI / polling / lighting setups.

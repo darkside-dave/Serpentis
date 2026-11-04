@@ -40,6 +40,124 @@ NagaDockRegistry.set(123, supported: false)
 expect(!dockService.isNaga, "Revoke dock authorization on identity loss or removal")
 expect(DiagnosticConnection.dock.label == "Mouse Dock Pro", "Identify dock connections in troubleshooting")
 
+// Dock effects have their own address and must not use mouse-zone payloads.
+let dockColor = RGB(r: 25, g: 100, b: 220)
+expect(DockEffect.staticColor.arguments(dockColor) == [1, 0, 1, 0, 0, 1, 25, 100, 220], "Solid dock lighting targets LED zero")
+expect(DockEffect.breathing.arguments(dockColor) == [1, 0, 2, 1, 0, 1, 25, 100, 220], "Single-color breathing has both color-count fields")
+expect(DockEffect.waveReverse.arguments(dockColor) == [1, 0, 4, 2, 0x28, 0], "Encode the wave direction and speed")
+let dockSolid = ZoneLight(effect: [1, 15, 1, 0, 0, 1, 25, 100, 220, 0, 0, 0], brightness: 128)
+expect(DockEffect.staticColor.matches(dockSolid, color: dockColor, brightness: 128), "Accept the dock's LED 0x0F echo")
+expect(!DockEffect.staticColor.matches(dockSolid, color: RGB(r: 1, g: 2, b: 3), brightness: 128), "A mismatched saved color must not count as success")
+expect(!DockEffect.staticColor.matches(dockSolid, color: dockColor, brightness: 64), "A mismatched saved brightness must not count as success")
+expect(DockEffect.decode(ZoneLight(effect: [1, 15, 4, 2, 0x28, 0], brightness: 100)) == .waveReverse, "Read the dock's wave direction")
+expect(DockEffect.decode(ZoneLight(effect: [], brightness: 0)) == nil, "Reject incomplete dock effect state")
+expect(MouseRefreshRequest.all.fields.contains(.dockLighting) && !MouseRefreshRequest.lighting.fields.contains(.dockLighting), "Mouse lighting changes must not include the dock")
+expect(MouseRefreshRequest.dockLighting.buttonIDs.isEmpty && MouseRefreshRequest.dockLighting.fields == .dockLighting, "Dock refreshes must not read or change mouse controls")
+for (hz, code) in PollingProtocol.dockCodes {
+    expect(PollingProtocol.decode(code, extended: true) == hz, "Decode every characterized dock polling rate")
+}
+expect(PollingProtocol.decode(1, extended: true) == 8000 && PollingProtocol.decode(1, extended: false) == 1000, "The same rate byte has different meanings in the two protocols")
+expect(PollingProtocol.decode(3, extended: true) == nil, "Unknown polling codes must not display an invented rate")
+expect(PollingProtocol.standardRates.allSatisfy { $0 <= 1000 } && PollingProtocol.dockRates.contains(8000), "Keep high rates scoped to the dock's extended protocol")
+
+// Sustained input cadence must not be inferred from one short interval or duplicate timestamps.
+for hz in [125, 500, 1000, 2000, 4000, 8000] {
+    var cadence = ReportRateWindow()
+    for n in 0...hz { cadence.record(Double(n) / Double(hz)) }
+    expect(abs((cadence.best ?? 0) - Double(hz)) < 0.01, "Measure the sustained raw-report cadence")
+}
+var shortBurst = ReportRateWindow()
+for n in 0..<1000 { shortBurst.record(Double(n) / 8000) }
+expect(shortBurst.best == nil, "A brief burst must not establish a sustained rate")
+var duplicateTimes = ReportRateWindow()
+duplicateTimes.record(1); duplicateTimes.record(1); duplicateTimes.record(0.5); duplicateTimes.record(.nan)
+expect(duplicateTimes.total == 1 && duplicateTimes.best == nil, "Reject duplicate, reversed and invalid timestamps")
+var idleCadence = ReportRateWindow()
+for n in 0...100 { idleCadence.record(Double(n) / 1000) }
+for n in 0...1000 { idleCadence.record(10 + Double(n) / 1000) }
+expect(abs((idleCadence.best ?? 0) - 1000) < 0.01, "Exclude idle gaps without inventing a higher rate")
+
+// Battery colors are stable within each band and persist independently of hardware state.
+let palette = DockBatteryPalette.defaults
+expect(palette.color(for: 0) == palette.low && palette.color(for: 24) == palette.low, "The lowest battery band includes 0 through 24")
+expect(palette.color(for: 25) == palette.mediumLow && palette.color(for: 49) == palette.mediumLow, "The second band includes 25 through 49")
+expect(palette.color(for: 50) == palette.mediumHigh && palette.color(for: 74) == palette.mediumHigh, "The third band includes 50 through 74")
+expect(palette.color(for: 75) == palette.high && palette.color(for: 100) == palette.high, "The highest band includes 75 through 100")
+expect(palette.color(for: -1) == nil && palette.color(for: 101) == nil, "Reject invalid battery levels")
+let targetA = DockBatteryTarget.make(level: 70, palette: palette, brightness: 100)
+expect(targetA == DockBatteryTarget.make(level: 71, palette: palette, brightness: 100), "Battery changes within a band must not require another write")
+expect(targetA != DockBatteryTarget.make(level: 75, palette: palette, brightness: 100), "Crossing a color boundary changes the target")
+expect(targetA != DockBatteryTarget.make(level: 70, palette: palette, brightness: 50), "Changing brightness updates the target")
+expect(DockBatteryTarget.make(level: nil, palette: palette, brightness: 100) == nil, "An unavailable battery must not invent a lighting target")
+var customPalette = palette
+customPalette.set(2, color: RGB(r: 100, g: 50, b: 200))
+expect(DockBatteryTarget.make(level: 70, palette: customPalette, brightness: 100) != targetA, "Changing the active band's color updates the dock")
+customPalette.set(0, color: RGB(r: 5, g: 10, b: 15))
+expect(customPalette.high == palette.high, "Editing one band preserves the other colors")
+let encodedPalette = try JSONEncoder().encode(customPalette)
+let decodedPalette = try JSONDecoder().decode(DockBatteryPalette.self, from: encodedPalette)
+expect(decodedPalette == customPalette, "Custom colors survive saving and loading")
+let cancelledColor = DockBatteryUpdate(target: targetA!)
+expect(cancelledColor.active, "A new battery update starts active")
+cancelledColor.cancel()
+expect(!cancelledColor.active, "A cancelled queued update cannot overwrite a later manual effect")
+
+expect(!targetA!.requiresWrite(applied: targetA, pending: nil), "A confirmed unchanged color must not be written again")
+expect(!targetA!.requiresWrite(applied: nil, pending: targetA), "Do not enqueue the same color twice")
+let differentTarget = DockBatteryTarget.make(level: 100, palette: palette, brightness: 100)!
+expect(targetA!.requiresWrite(applied: targetA, pending: differentTarget), "Restore the intended color when a different queued update is being cancelled")
+let paletteSuite = "com.serpentis.palette-test.\(UUID().uuidString)"
+let paletteDefaults = UserDefaults(suiteName: paletteSuite)!
+paletteDefaults.set(encodedPalette, forKey: "dockBatteryPalette")
+paletteDefaults.set(true, forKey: "dockBatteryLightingEnabled")
+paletteDefaults.set(999, forKey: "dockBatteryBrightness")
+let restoredBatteryModel = SerpentisModel(defaults: paletteDefaults)
+expect(restoredBatteryModel.dockBatteryPalette == customPalette && restoredBatteryModel.dockBatteryEnabled, "Restore the palette and opt-in mode")
+expect(restoredBatteryModel.dockBatteryBrightness == 255, "Clamp stored brightness to the device's range")
+restoredBatteryModel.resetDockBatteryColors()
+expect(restoredBatteryModel.dockBatteryPalette == .defaults && restoredBatteryModel.dockBatteryEnabled && restoredBatteryModel.dockBatteryBrightness == 255, "Reset only the colors, preserving mode and brightness")
+expect(DockBatteryPalette.load(defaults: paletteDefaults) == .defaults, "Persist the restored default colors")
+paletteDefaults.removePersistentDomain(forName: paletteSuite)
+
+// Battery reads are capped even when menus and manual refreshes request telemetry repeatedly.
+var telemetryCache = BatteryTelemetryCache()
+expect(telemetryCache.needsRead(at: 0), "A new device session needs a battery reading")
+telemetryCache.record(BatteryTelemetry(level: 74, charging: false), at: 0)
+expect(!telemetryCache.needsRead(at: 59.99) && telemetryCache.needsRead(at: 60), "Successful battery readings have a strict sixty-second minimum interval")
+telemetryCache.record(nil, at: 60)
+expect(!telemetryCache.needsRead(at: 64.99) && telemetryCache.needsRead(at: 65), "Failed reads have a bounded five-second wake retry")
+var yellowBand: Int? = 2
+var greenBand: Int? = 3
+for n in 0..<100 {
+    let level = n.isMultiple(of: 2) ? 74 : 75
+    yellowBand = DockBatteryPalette.band(for: level, previous: yellowBand)
+    greenBand = DockBatteryPalette.band(for: level, previous: greenBand)
+}
+expect(yellowBand == 2 && greenBand == 3, "74/75 oscillation must not switch either established color")
+expect(DockBatteryPalette.band(for: 76, previous: 2) == 2 && DockBatteryPalette.band(for: 77, previous: 2) == 3, "Enter green only after clearing the upper hysteresis boundary")
+expect(DockBatteryPalette.band(for: 74, previous: 3) == 3 && DockBatteryPalette.band(for: 73, previous: 3) == 2, "Leave green only after clearing the lower hysteresis boundary")
+expect(DockBatteryPalette.band(for: 25, previous: 0) == 0 && DockBatteryPalette.band(for: 27, previous: 0) == 1, "Apply hysteresis at the low boundary too")
+expect(DockBatteryPalette.band(for: 80, previous: 0) == 3 && DockBatteryPalette.band(for: 10, previous: 3) == 0, "Large battery changes can cross several bands immediately")
+
+let smartReelOn = WheelProtocol.smartReelArguments(true)
+expect(smartReelOn.count == 80 && Array(smartReelOn.prefix(2)) == [1, 1] && smartReelOn.dropFirst(2).allSatisfy { $0 == 0 }, "Naga Smart Reel writes require the full 80-byte argument block")
+expect(WheelProtocol.smartReelArguments(false)[1] == 0, "Disabling Smart Reel changes only its state byte")
+expect(WheelMode(rawValue: 2) == .precisionTactile && WheelMode(rawValue: 3) == nil, "Accept only the three documented Naga wheel modes")
+expect(WheelProtocol.boolean(0) == false && WheelProtocol.boolean(1) == true && WheelProtocol.boolean(2) == nil, "Unknown Smart Reel values must remain unavailable")
+expect(MouseRefreshRequest.all.fields.contains(.wheel) && !MouseRefreshRequest.menu.fields.contains(.wheel), "Read wheel settings on a full refresh without adding menu traffic")
+expect(MouseRefreshRequest.wheel.fields == .wheel && MouseRefreshRequest.wheel.buttonIDs.isEmpty, "Wheel saves refresh only wheel state")
+
+var wheelClock = 0.0
+var wheelReadCount = 0
+expect(WheelProtocol.confirm(mode: .precisionTactile, read: {
+    wheelReadCount += 1
+    return wheelReadCount < 4 ? .tactile : .precisionTactile
+}, now: { wheelClock }, pause: { wheelClock += 0.5 }), "A delayed wheel transition must be confirmed without repeating the write")
+expect(wheelReadCount == 4, "Keep checking the observed mode while the wheel settles")
+wheelClock = 0
+expect(!WheelProtocol.confirm(mode: .precisionTactile, read: { nil }, now: { wheelClock }, pause: { wheelClock += 0.5 }), "A missing readback must not count as a saved mode")
+expect(wheelClock == 2.5, "Wheel confirmation must remain bounded")
+
 // Physical control IDs and factory assignments must match the protocol inventory.
 let ring = SerpentisModel.slot(0x39)
 expect(ring.name == "Ring / Pinky Button", "Slot 0x39 must select the ring-finger control")
@@ -238,6 +356,7 @@ func benchmarkMenu() {
     let application = NSApplication.shared
     application.setActivationPolicy(.prohibited)
     let delegate = AppDelegate()
+    delegate.model.automaticallyUpdatesDockLighting = false
     delegate.model.app = delegate
     let initialStart = Date()
     delegate.startHID()
@@ -331,13 +450,14 @@ if let flag = CommandLine.arguments.firstIndex(of: "--render"), CommandLine.argu
     app.setActivationPolicy(.prohibited)
     let model = SerpentisModel()
     model.connected = true; model.loadedOnce = true; model.connection = "Cable"; model.battery = 85
+    model.wheelMode = .tactile; model.smartReel = true
     for slot in SerpentisModel.slots { model.buttons[slot.id] = slot.factory }
     let suite = "com.serpentis.visual-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let input = MouseInputController(defaults: defaults)
-    @MainActor func render<V: View>(_ view: V, name: String, width: CGFloat, height: CGFloat) throws {
-        let host = NSHostingView(rootView: view.environmentObject(model).environmentObject(input).environmentObject(TroubleshootingController())
+    @MainActor func render<V: View>(_ view: V, name: String, width: CGFloat, height: CGFloat, fixture: SerpentisModel? = nil) throws {
+        let host = NSHostingView(rootView: view.environmentObject(fixture ?? model).environmentObject(input).environmentObject(TroubleshootingController())
             .environment(\.colorScheme, .dark).frame(width: width, height: height).background(Color(white: 0.12)))
         let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: width, height: height),
                               styleMask: .borderless, backing: .buffered, defer: false)
@@ -360,5 +480,14 @@ if let flag = CommandLine.arguments.firstIndex(of: "--render"), CommandLine.argu
         try render(ButtonsView(), name: "buttons", width: 760, height: 760)
         try render(InputSettingsView(), name: "pointer-and-scrolling", width: 760, height: 680)
         try render(TroubleshootingView(), name: "troubleshooting", width: 780, height: 900)
+        model.dockAvailable = true; model.dockLight = dockSolid
+        model.polling = 8000; model.pollingRates = PollingProtocol.dockRates
+        model.wheelMode = .tactile; model.smartReel = true
+        try render(LightingView(), name: "dock-lighting", width: 760, height: 980)
+        try render(PerformanceView(), name: "dock-polling", width: 760, height: 700)
+        defaults.set(true, forKey: "dockBatteryLightingEnabled")
+        let batteryModel = SerpentisModel(defaults: defaults)
+        batteryModel.dockAvailable = true; batteryModel.dockLight = dockSolid
+        try render(DockLightingEditor(), name: "dock-battery", width: 760, height: 350, fixture: batteryModel)
     }
 }

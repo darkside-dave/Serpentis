@@ -12,6 +12,8 @@ struct ButtonSlot: Identifiable, Hashable {
 
 final class SerpentisModel: ObservableObject {
     weak var app: AppDelegate?
+    let pollingMonitor = PollingMonitor()
+    var automaticallyUpdatesDockLighting = true
     @Published var selectedSection: PaneSection? = .buttons
     @Published var connected = false
     @Published var connection = ""
@@ -23,6 +25,15 @@ final class SerpentisModel: ObservableObject {
     @Published var dpi: DPIStage?
     @Published var stages: DPIStageSet?
     @Published var polling: Int?
+    @Published var pollingRates = PollingProtocol.standardRates
+    @Published var dockAvailable = false
+    @Published var dockLight: ZoneLight?
+    @Published var wheelMode: WheelMode?
+    @Published var smartReel: Bool?
+    @Published private(set) var dockBatteryEnabled: Bool
+    @Published private(set) var dockBatteryPalette: DockBatteryPalette
+    @Published private(set) var dockBatteryBrightness: UInt8
+    @Published private(set) var dockBatteryStatus = "Waiting for a battery reading."
     @Published var lights: [Zone: ZoneLight] = [:]
     @Published var buttons: [UInt8: [UInt8]] = [:]
     @Published var sleepSeconds: Int?
@@ -33,10 +44,21 @@ final class SerpentisModel: ObservableObject {
     @Published var layoutNames: [String] = []
     @Published var profileNames: [String] = []
 
+    private let defaults: UserDefaults
     private let queue = DispatchQueue(label: "serpentis.io")
     private var pendingLight: DispatchWorkItem?
     private var refreshQueue = RefreshQueue()
     private var generation = 0
+    private var dockBatteryBand: Int?
+    private var dockBatteryApplied: DockBatteryTarget?
+    private var dockBatteryUpdate: DockBatteryUpdate?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        dockBatteryEnabled = defaults.bool(forKey: "dockBatteryLightingEnabled")
+        dockBatteryPalette = DockBatteryPalette.load(defaults: defaults)
+        dockBatteryBrightness = UInt8(clamping: (defaults.object(forKey: "dockBatteryBrightness") as? NSNumber)?.intValue ?? 128)
+    }
 
     static let slots: [ButtonSlot] = {
         var s: [ButtonSlot] = []
@@ -67,10 +89,14 @@ final class SerpentisModel: ObservableObject {
 
     // MARK: Refresh
     func deviceChanged() {
+        pollingMonitor.stop()
+        dockBatteryUpdate?.cancel(); dockBatteryUpdate = nil; dockBatteryApplied = nil; dockBatteryBand = nil
         generation += 1
         refreshQueue = RefreshQueue()
         busy = 0; loadedOnce = false; firmware = ""
         dpi = nil; stages = nil; polling = nil; lights = [:]; buttons = [:]
+        wheelMode = nil; smartReel = nil
+        pollingRates = PollingProtocol.standardRates; dockAvailable = app?.dock != nil; dockLight = nil
         sleepSeconds = nil; lowPowerRaw = nil; battery = nil; charging = false
         connected = app?.mouse != nil && app?.mouse?.productID != kMouseDockProPID; asleep = false
         connection = app?.mouse?.connectionName ?? ""
@@ -79,7 +105,8 @@ final class SerpentisModel: ObservableObject {
 
     func refresh(_ request: MouseRefreshRequest = .all) {
         reloadNames()
-        guard let mouse = app?.mouse else {
+        let mouse = app?.mouse
+        guard mouse != nil || app?.dock != nil else {
             if connected { connected = false }
             if asleep { asleep = false }
             if battery != nil { battery = nil }
@@ -89,12 +116,13 @@ final class SerpentisModel: ObservableObject {
         read(next, mouse: mouse, generation: generation)
     }
 
-    private func read(_ request: MouseRefreshRequest, mouse: RazerMouse, generation: Int) {
+    private func read(_ request: MouseRefreshRequest, mouse: RazerMouse?, generation: Int) {
         busy += 1
+        let dock = app?.dock
         queue.async {
-            let snapshot = MouseSnapshot(mouse: mouse, request: request)
+            let snapshot = MouseSnapshot(mouse: mouse, dock: dock, request: request)
             DispatchQueue.main.async {
-                guard self.generation == generation, self.app?.mouse === mouse else { return }
+                guard self.generation == generation, self.app?.mouse === mouse, self.app?.dock === dock else { return }
                 self.busy -= 1
                 self.apply(snapshot, request: request)
                 if !self.loadedOnce, snapshot.supported, (snapshot.battery != nil || request == .identity), request != .all {
@@ -106,15 +134,16 @@ final class SerpentisModel: ObservableObject {
     }
 
     private func apply(_ value: MouseSnapshot, request: MouseRefreshRequest) {
+        if request.fields.contains(.dockLighting), dockLight != value.dockLight { dockLight = value.dockLight }
         if let mouse = app?.mouse, mouse.productID == kMouseDockProPID {
             NagaDockRegistry.set(mouse.locationID, supported: value.supported)
             app?.input.devicesChanged()
         }
         if connected != value.supported { connected = value.supported }
         guard value.supported else {
-            connectionIssue = "Mouse Dock Pro is connected, but it did not confirm a paired Naga V3 Pro. Wake the mouse and click Refresh."
+            connectionIssue = app?.mouse?.productID == kMouseDockProPID ? "Mouse Dock Pro is connected, but it did not confirm a paired Naga V3 Pro. Wake the mouse and click Refresh." : ""
             loadedOnce = false; buttons = [:]; lights = [:]; battery = nil
-            dpi = nil; stages = nil; firmware = ""; polling = nil
+            dpi = nil; stages = nil; firmware = ""; polling = nil; wheelMode = nil; smartReel = nil
             sleepSeconds = nil; lowPowerRaw = nil; charging = false
             app?.buttonCache = [:]; app?.lights = [:]; app?.updateBattery(nil, charging: false)
             return
@@ -125,6 +154,7 @@ final class SerpentisModel: ObservableObject {
             if charging != value.charging { charging = value.charging }
             if asleep != (value.battery == nil) { asleep = value.battery == nil }
             app?.updateBattery(value.battery, charging: value.charging)
+            updateDockBatteryLighting(observed: value.dockLight)
             guard value.battery != nil else { return }
         }
         if let v = value.firmware, firmware != v { firmware = v }
@@ -132,6 +162,11 @@ final class SerpentisModel: ObservableObject {
             if dpi != value.dpi { dpi = value.dpi }
             if stages != value.stages { stages = value.stages }
             if polling != value.polling { polling = value.polling }
+            if pollingRates != value.pollingRates { pollingRates = value.pollingRates }
+        }
+        if request.fields.contains(.wheel) {
+            if wheelMode != value.wheelMode { wheelMode = value.wheelMode }
+            if smartReel != value.smartReel { smartReel = value.smartReel }
         }
         if request.fields.contains(.lighting), lights != value.lights { lights = value.lights }
         var merged = buttons
@@ -241,7 +276,16 @@ final class SerpentisModel: ObservableObject {
         let cx = max(100, min(30000, x)), cy = max(100, min(30000, y))
         run("The mouse didn't confirm that DPI.", refresh: .performance) { m in m.setDPI(cx, cy) && m.dpi() == DPIStage(x: cx, y: cy) }
     }
-    func setPolling(_ hz: Int) { run("The mouse didn't accept that polling rate.", refresh: .performance) { $0.setPollingRate(hz) } }
+    func setPolling(_ hz: Int) { pollingMonitor.stop(); run("The mouse didn't accept that polling rate.", refresh: .performance) { $0.setPollingRate(hz) } }
+
+    func setWheelMode(_ mode: WheelMode) {
+        guard wheelMode != nil else { return }
+        run("The mouse did not confirm the wheel mode.", refresh: .wheel) { $0.setWheelMode(mode) }
+    }
+    func setSmartReel(_ enabled: Bool) {
+        guard smartReel != nil else { return }
+        run("The mouse did not confirm Smart Reel.", refresh: .wheel) { $0.setSmartReel(enabled) }
+    }
 
     // MARK: Lighting
     func setEffect(_ zones: [Zone], _ kind: EffectKind, _ color: RGB) {
@@ -271,6 +315,83 @@ final class SerpentisModel: ObservableObject {
     func setBrightness(_ zones: [Zone], _ percent: Double) {
         let v = UInt8(max(0, min(255, (percent / 100 * 255).rounded())))
         run("The mouse didn't accept that brightness.", refresh: .lighting) { m in zones.allSatisfy { m.setBrightness($0, v) } }
+    }
+
+    func setDockLight(_ effect: DockEffect, color: RGB, percent: Double, palette: DockBatteryPalette? = nil) {
+        guard let dock = app?.dock else { errorText = "Mouse Dock Pro is not connected."; return }
+        if dockBatteryUpdate != nil { dockBatteryApplied = nil }
+        dockBatteryUpdate?.cancel(); dockBatteryUpdate = nil
+        let brightness = UInt8(max(0, min(255, (percent / 100 * 255).rounded())))
+        if effect == .battery {
+            if let palette = palette { storeDockBatteryPalette(palette) }
+            dockBatteryBrightness = brightness
+            defaults.set(Int(brightness), forKey: "dockBatteryBrightness")
+            dockBatteryEnabled = true
+            defaults.set(true, forKey: "dockBatteryLightingEnabled")
+            updateDockBatteryLighting()
+            return
+        }
+        dockBatteryEnabled = false; dockBatteryApplied = nil; dockBatteryBand = nil
+        defaults.set(false, forKey: "dockBatteryLightingEnabled")
+        let generation = self.generation
+        busy += 1
+        queue.async {
+            let ok = dock.setDockLight(effect, color: color, brightness: brightness)
+            DispatchQueue.main.async {
+                guard self.generation == generation, self.app?.dock === dock else { return }
+                self.busy -= 1
+                if !ok { self.errorText = "The dock did not confirm all lighting changes. Refresh its settings before retrying." }
+                self.refresh(.dockLighting)
+            }
+        }
+    }
+
+    private func storeDockBatteryPalette(_ palette: DockBatteryPalette) {
+        guard dockBatteryPalette != palette else { return }
+        dockBatteryPalette = palette
+        if let data = try? JSONEncoder().encode(palette) { defaults.set(data, forKey: "dockBatteryPalette") }
+    }
+    func resetDockBatteryColors() {
+        storeDockBatteryPalette(.defaults)
+        updateDockBatteryLighting()
+    }
+    func stopDockBatteryLighting() {
+        dockBatteryUpdate?.cancel(); dockBatteryUpdate = nil
+    }
+    private func updateDockBatteryLighting(observed: ZoneLight? = nil) {
+        guard automaticallyUpdatesDockLighting, dockBatteryEnabled, let dock = app?.dock else { return }
+        guard let level = battery, let band = DockBatteryPalette.band(for: level, previous: dockBatteryBand) else {
+            dockBatteryStatus = "Waiting for a battery reading. The dock keeps its last color."
+            return
+        }
+        dockBatteryBand = band
+        let target = DockBatteryTarget(color: dockBatteryPalette.colors[band], brightness: dockBatteryBrightness)
+        let status = "Battery: \(level)%. Color updates while Serpentis is running."
+        if dockBatteryStatus != status { dockBatteryStatus = status }
+        if dockBatteryUpdate == nil, let observed = observed,
+           DockEffect.staticColor.matches(observed, color: target.color, brightness: target.brightness) {
+            dockBatteryApplied = target
+        }
+        guard target.requiresWrite(applied: dockBatteryApplied, pending: dockBatteryUpdate?.target) else { return }
+        dockBatteryUpdate?.cancel()
+        let update = DockBatteryUpdate(target: target)
+        dockBatteryUpdate = update
+        let generation = self.generation
+        queue.async {
+            guard update.active else { return }
+            let ok = dock.setDockLight(.staticColor, color: target.color, brightness: target.brightness)
+            DispatchQueue.main.async {
+                guard update.active, self.generation == generation, self.app?.dock === dock, self.dockBatteryEnabled else { return }
+                self.dockBatteryUpdate = nil
+                if ok {
+                    self.dockBatteryApplied = target
+                    self.dockLight = ZoneLight(effect: DockEffect.staticColor.arguments(target.color), brightness: target.brightness)
+                } else {
+                    self.dockBatteryApplied = nil
+                    self.dockBatteryStatus = "The dock did not confirm the battery color. Retrying after the next battery reading."
+                }
+            }
+        }
     }
 
     // MARK: Power

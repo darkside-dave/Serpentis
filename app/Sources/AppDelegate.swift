@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let menu = NSMenu()
     var manager: IOHIDManager!
     var mouse: RazerMouse?
+    var dock: RazerMouse?
     var openFailed = false
     var lights: [Zone: ZoneLight] = [:]
     var battery: Int?
@@ -62,8 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         startHID()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appActivated(_:)),
                                                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshBattery() }
-        timer?.tolerance = 10
+        timer = Timer.scheduledTimer(withTimeInterval: 65, repeats: true) { [weak self] _ in self?.refreshBattery() }
+        timer?.tolerance = 5
         updateTitle()
         if !CommandLine.arguments.contains("--hidden") { DispatchQueue.main.async { self.openWindow() } }
     }
@@ -102,12 +103,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let b = (IOHIDDeviceGetProperty($1, kIOHIDProductIDKey as CFString) as? Int) ?? 0
             return NagaTransport.priority(a) < NagaTransport.priority(b)
         }.first
-        if let cur = mouse, let p = preferred, CFEqual(cur.device, p) { return }
+        let dockDevice = candidates.first { (IOHIDDeviceGetProperty($0, kIOHIDProductIDKey as CFString) as? Int) == kMouseDockProPID }
+        let sameMouse = mouse.map { current in preferred.map { CFEqual(current.device, $0) } ?? false } ?? (preferred == nil)
+        let sameDock = dock.map { current in dockDevice.map { CFEqual(current.device, $0) } ?? false } ?? (dockDevice == nil)
+        if sameMouse && sameDock { return }
         if let previous = mouse, previous.productID == kMouseDockProPID {
             NagaDockRegistry.set(previous.locationID, supported: false)
         }
         dockTimer?.invalidate(); dockTimer = nil
-        mouse = nil
+        mouse = nil; dock = nil
         openFailed = false
         lights = [:]
         buttonCache = [:]
@@ -125,6 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             } else {
                 openFailed = true
             }
+        }
+        if let device = dockDevice {
+            dock = mouse?.productID == kMouseDockProPID ? mouse : RazerMouse(device: device)
         }
         model.deviceChanged()
         updateTitle()
@@ -227,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Polling
         let rate = model.polling
         let pm = NSMenu()
-        for hz in [125, 500, 1000] { pm.addItem(item("\(hz) Hz", #selector(setRate(_:)), tag: hz, checked: rate == hz)) }
+        for hz in model.pollingRates { pm.addItem(item("\(hz) Hz", #selector(setRate(_:)), tag: hz, checked: rate == hz)) }
         menu.addItem(submenu("Polling Rate: \(rate.map { "\($0) Hz" } ?? "?")", pm))
 
         // Lighting
@@ -446,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func toggleAcceleration() { input.setDisableAcceleration(!input.disableAcceleration) }
     @objc func toggleScrollInversion() { input.setInvertScrolling(!input.invertScrolling) }
     @objc func openInputAccessibility() { input.openAccessibility() }
-    func applicationWillTerminate(_ notification: Notification) { troubleshooting.stopTest(); input.stop() }
+    func applicationWillTerminate(_ notification: Notification) { model.stopDockBatteryLighting(); model.pollingMonitor.stop(); troubleshooting.stopTest(); input.stop() }
 
     // MARK: - Window
     @objc func openWindow() {
@@ -473,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         openWindow()
     }
     func windowWillClose(_ notification: Notification) {
+        model.pollingMonitor.stop()
         troubleshooting.stopTest()
         NSApp.setActivationPolicy(.accessory)
     }

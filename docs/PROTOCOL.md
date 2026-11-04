@@ -82,4 +82,32 @@ Profile `0` reads the effective assignment; the app reads and writes the stored
 profile-1 bank. Saving a button requires both a matching command reply and a
 separate assignment readback.
 
-Unverified: Hypershift (probably layer byte 0x01), onboard profile slots, scroll-wheel mode, calibration.
+Unverified: Hypershift (probably layer byte 0x01), onboard profile slots, calibration.
+
+## Mouse Dock Pro lighting
+
+Dock lighting uses transaction `0xFF` on the same 90-byte control interface. It is separate from the paired mouse's `0x1F` commands and does not require a paired Naga. Effects use `0F:02` with storage `0x01`, LED `0x00`: off `0x00`, solid `0x01`, breathing `0x02`, spectrum `0x03`, and wave `0x04`. Wave directions are `0x01` and `0x02`, with speed `0x28`.
+
+Brightness writes use `0F:04`, size `0x03`, arguments `[1, 0, brightness]`. Reads use `0F:84` with `[1, 0x0F]`; reading LED zero returns zero even when the dock is lit. Effect reads use `0F:82`, size `0x0C`, arguments `[1, 0]`. The dock echoes LED `0x0F` in effect replies. Serpentis compares the saved effect, color and brightness without treating that echo as a different zone.
+
+Reference: [OpenSnek Mouse Dock Pro support notes](https://github.com/gh123man/OpenSnek/blob/main/docs/DEVICE_SUPPORT.md#razer-mouse-dock-pro). Dock changes refresh only dock lighting, and mouse lighting controls do not write to the dock.
+
+## Mouse Dock Pro extended polling
+
+For the paired Naga, `00:C0` (size `0x01`, transaction `0x1F`) reads the extended polling rate from reply byte 9. `00:40` (size `0x02`) writes `[0, rate code]` to the live slot. Codes are `0x40` = 125 Hz, `0x20` = 250 Hz, `0x10` = 500 Hz, `0x08` = 1000 Hz, `0x04` = 2000 Hz, `0x02` = 4000 Hz, and `0x01` = 8000 Hz.
+
+Only an explicit unsupported response (`0x05`) falls back to the original `00:85` / `00:05` protocol. Timeouts and unknown codes remain unavailable. Serpentis offers high rates only after a valid extended read and verifies writes with a fresh rate read. This confirms device configuration; it does not measure the rate delivered to applications by macOS.
+
+References: [OpenRazer protocol builders](https://github.com/openrazer/openrazer/blob/master/driver/razerchromacommon.c) and [Dock Pro high-polling support](https://github.com/openrazer/openrazer/pull/2937).
+
+Battery Level is a software mode using the dock's solid-color command. It uses mouse battery telemetry and writes only when the palette target or brightness changes. Battery telemetry is cached for 60 seconds after successful reads, with five-second retry spacing after failure. See [battery lighting performance](PERFORMANCE.md#battery-lighting) for color hysteresis and update ownership.
+
+## Naga V3 Pro wheel controls
+
+The Naga V3 Pro uses `02:B0` / `02:30` for wheel-mode read/write, size `0x02`, arguments `[1, mode]`. Modes are `0` tactile, `1` free spin and `2` precision tactile. The older `02:94` / `02:14` family is not used.
+
+Smart Reel reads use `02:97`, size `0x02`, arguments `[1]`. Writes use `02:17` with size `0x50` and the full 80-byte argument block: `[1, enabled]` followed by 78 zero bytes. Transaction ID remains `0x1F`, including relay through Mouse Dock Pro. Both setters require a fresh matching readback. Wheel-mode confirmation waits up to 2.5 seconds for the mechanism to settle and uses the observed mode even if the initial write reply was incomplete. The write is sent only once. Unknown or unavailable reads leave the corresponding control unavailable; opening the app does not change the selected mode.
+
+Reference: [Naga-specific OpenRazer protocol builders](https://github.com/openrazer/openrazer/blob/dee083d68e64147849fb8832582fcda405084e22/driver/razerchromacommon.c). Wheel settings are separate from the front wheel-mode button's assignment and are not included in saved lighting/DPI profiles.
+
+Wheel mode and Smart Reel are grouped under Pointer & Scrolling. Fixed wheel-mode selection is disabled while Smart Reel is enabled. The separate five-level Smart Reel responsiveness setting is not mapped and has no control in Serpentis.
