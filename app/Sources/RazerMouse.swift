@@ -46,19 +46,52 @@ struct ZoneLight: Codable, Equatable {
 private func hi(_ v: Int) -> UInt8 { UInt8((v >> 8) & 0xFF) }
 private func lo(_ v: Int) -> UInt8 { UInt8(v & 0xFF) }
 
+struct RazerReportTransport {
+    var send: ([UInt8]) -> Bool
+    var receive: () -> [UInt8]?
+    var wait: (UInt32) -> Void
+
+    static func hid(_ device: IOHIDDevice) -> RazerReportTransport {
+        RazerReportTransport(
+            send: { report in
+                var buffer = report
+                return IOHIDDeviceSetReport(device, kIOHIDReportTypeFeature, 0, &buffer, buffer.count) == kIOReturnSuccess
+            },
+            receive: {
+                var buffer = [UInt8](repeating: 0, count: 90)
+                var length = CFIndex(buffer.count)
+                guard IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, 0, &buffer, &length) == kIOReturnSuccess else { return nil }
+                guard length == buffer.count else { return nil }
+                return buffer
+            },
+            wait: { usleep($0) }
+        )
+    }
+}
+
 final class RazerMouse {
-    let device: IOHIDDevice
+    let device: IOHIDDevice?
     let productID: Int
+    private let transport: RazerReportTransport
     private let txn: UInt8 = 0x1F
     private let lock = NSLock()
     var connectionName: String { kNagaPIDs[productID] ?? "USB" }
 
-    init?(device: IOHIDDevice) {
-        self.device = device
-        self.productID = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+    convenience init?(device: IOHIDDevice) {
         guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else { return nil }
+        let productID = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+        self.init(productID: productID, transport: .hid(device), device: device)
     }
-    deinit { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+    init(productID: Int, transport: RazerReportTransport, device: IOHIDDevice? = nil) {
+        self.device = device
+        self.productID = productID
+        self.transport = transport
+    }
+
+    deinit {
+        if let device = device { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+    }
 
     // MARK: - Protocol
     private func makeReport(_ cls: UInt8, _ cmd: UInt8, _ size: UInt8, _ args: [UInt8]) -> [UInt8] {
@@ -74,20 +107,25 @@ final class RazerMouse {
     /// Sends a command and returns the reply if the mouse answered "OK".
     func query(_ cls: UInt8, _ cmd: UInt8, size: UInt8, args: [UInt8] = []) -> [UInt8]? {
         lock.lock(); defer { lock.unlock() }
-        var buf = makeReport(cls, cmd, size, args)
-        guard IOHIDDeviceSetReport(device, kIOHIDReportTypeFeature, 0, &buf, buf.count) == kIOReturnSuccess else { return nil }
-        usleep(45_000)
+        let report = makeReport(cls, cmd, size, args)
+        guard transport.send(report) else { return nil }
+        transport.wait(45_000)
         for _ in 0..<20 {
-            var out = [UInt8](repeating: 0, count: 90)
-            var len = CFIndex(90)
-            guard IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, 0, &out, &len) == kIOReturnSuccess else { return nil }
-            if out[0] == 0x01 || out[6] != cls || out[7] != cmd { usleep(25_000); continue }
+            guard let out = transport.receive(), out.count == 90 else { return nil }
+            if out[0] == 0x01 || out[6] != cls || out[7] != cmd { transport.wait(25_000); continue }
             return out[0] == 0x02 ? out : nil
         }
         return nil
     }
 
     // MARK: - Info
+    func serial() -> String? {
+        guard let report = query(0x00, 0x82, size: 0x16) else { return nil }
+        let bytes = report[8..<30].prefix { $0 != 0 }
+        guard !bytes.isEmpty, bytes.allSatisfy({ (0x20...0x7E).contains($0) }) else { return nil }
+        return String(bytes: bytes, encoding: .ascii)
+    }
+
     func firmware() -> String? {
         guard let r = query(0x00, 0x81, size: 0x02) else { return nil }
         return "\(r[8]).\(String(format: "%02d", r[9]))"
@@ -203,7 +241,9 @@ final class RazerMouse {
         ("Wheel Tilt Left", 0x34, [0x01, 0x34, 0x00, 0x0E, 0x01, 0x68, 0x00, 0x14, 0, 0]),
         ("Wheel Tilt Right", 0x35, [0x01, 0x35, 0x00, 0x0E, 0x01, 0x69, 0x00, 0x14, 0, 0]),
         ("Button Behind Wheel", 0x39, [0x01, 0x39, 0x00, 0x0C, 0x01, 0x01, 0, 0, 0, 0]),
+        ("Right Click", 0x02, [0x01, 0x02, 0x00, 0x01, 0x01, 0x02, 0, 0, 0, 0]),
     ]
+    static let discoverableButtonIDs: [UInt8] = [0x04, 0x05, 0x0B, 0x0C, 0x0E, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x6A]
 
     // MARK: - Power
     func sleepTimer() -> Int? {

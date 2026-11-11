@@ -141,7 +141,7 @@ struct MouseTopView: View {
             Path { p in p.move(to: CGPoint(x: 90, y: 104)); p.addLine(to: CGPoint(x: 90, y: 115)) }
                 .stroke(Color.primary.opacity(0.25), lineWidth: 1)
             Text("Left").font(.caption).foregroundStyle(.secondary).position(x: 42, y: 30)
-            Text("Right").font(.caption).foregroundStyle(.secondary).position(x: 138, y: 30)
+            PadButton(slot: s[16], selected: $selected, w: 54, h: 30).position(x: 138, y: 30)
             PadButton(slot: s[13], selected: $selected, w: 28, h: 46).position(x: 52, y: 72)
             PadButton(slot: s[12], selected: $selected, w: 36, h: 62).position(x: 90, y: 72)
             PadButton(slot: s[14], selected: $selected, w: 28, h: 46).position(x: 128, y: 72)
@@ -190,8 +190,10 @@ struct ButtonEditor: View {
     @LocalState private var key: UInt8?
     @LocalState private var mods: UInt8 = 0
     @LocalState private var mouseButton: UInt8
+    @LocalState private var preservePhysicalModifiers: Bool
+    @LocalState private var applyToMatchingButtons = false
 
-    init(slot: ButtonSlot, current: [UInt8]?, isDefault: Bool) {
+    init(slot: ButtonSlot, current: [UInt8]?, isDefault: Bool, preservePhysicalModifiers: Bool) {
         self.slot = slot
         var m: AssignMode = .standard
         var k: UInt8? = nil, md: UInt8 = 0, mb: UInt8 = 4
@@ -200,6 +202,12 @@ struct ButtonEditor: View {
             else if c[3] == 0x01 { m = .mouse; mb = c[5] }
         }
         _mode = LocalState(wrappedValue: m); _key = LocalState(wrappedValue: k); _mods = LocalState(wrappedValue: md); _mouseButton = LocalState(wrappedValue: mb)
+        _preservePhysicalModifiers = LocalState(wrappedValue: preservePhysicalModifiers)
+        if preservePhysicalModifiers, let current = current, current.count >= 7, current[3] == 2 {
+            _mode = LocalState(wrappedValue: .key)
+            _key = LocalState(wrappedValue: current[6])
+            _mods = LocalState(wrappedValue: current[5])
+        }
     }
 
     var body: some View {
@@ -210,7 +218,11 @@ struct ButtonEditor: View {
                     Spacer()
                     Text("Now: \(model.describe(slot))").foregroundStyle(.secondary)
                 }
-                Picker("", selection: $mode) { ForEach(AssignMode.allCases) { Text($0.rawValue).tag($0) } }
+                Picker("", selection: $mode) {
+                    ForEach(AssignMode.allCases) {
+                        Text($0 == .standard && !slot.factoryKnown ? "Restore Captured" : $0.rawValue).tag($0)
+                    }
+                }
                     .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 420)
                 Group {
                     switch mode {
@@ -230,11 +242,27 @@ struct ButtonEditor: View {
                         }.frame(width: 300)
                     }
                 }.frame(minHeight: 46, alignment: .leading)
+                if mode == .key {
+                    Toggle("Combine with physical keyboard modifiers", isOn: $preservePhysicalModifiers)
+                    if preservePhysicalModifiers {
+                        Text("Uses fixed modifiers plus held keyboard modifiers. Requires Serpentis to stay open, Input Monitoring and Accessibility.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Grant Permissions…") { model.app?.requestInputPermissions() }
+                    }
+                    if let key = key, model.buttons.contains(where: {
+                        $0.key != slot.id && $0.value.count == 10 && $0.value[3] == 2 && $0.value[6] == key
+                    }) {
+                        Toggle("Apply the modifier option to all buttons emitting this key", isOn: $applyToMatchingButtons)
+                        Text("The mouse does not identify individual buttons when they emit the same key. Fixed modifiers must also match when enabling this option.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 HStack {
-                    Button("Save to Mouse") { save() }
+                    Button(preservePhysicalModifiers && mode == .key ? "Save and Enable Filter" : "Save to Mouse") { save() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(mode == .key && key == nil)
-                    Text("Saved in the mouse's memory").font(.caption).foregroundStyle(.secondary)
+                        .disabled(model.busy > 0 || (mode == .key && key == nil))
+                    Text(preservePhysicalModifiers && mode == .key ? "Option saved on this Mac" : "Saved in the mouse's memory")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }.padding(10)
         }
@@ -243,7 +271,12 @@ struct ButtonEditor: View {
     func save() {
         switch mode {
         case .standard: model.setButton(slot.factory)
-        case .key: if let k = key { model.setButton(RazerMouse.keyArgs(slot.id, mod: mods, key: k)) }
+        case .key:
+            if let k = key {
+                model.setButton(RazerMouse.keyArgs(slot.id, mod: mods, key: k),
+                                preservePhysicalModifiers: preservePhysicalModifiers,
+                                applyToMatchingButtons: applyToMatchingButtons)
+            }
         case .mouse: model.setButton(RazerMouse.mouseArgs(slot.id, button: mouseButton))
         }
     }
@@ -262,7 +295,7 @@ struct LayoutsBox: View {
                         if !n.isEmpty { model.saveLayout(n); name = "" }
                     }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                     Spacer()
-                    Button("Reset All Buttons to Default") { model.resetAllButtons() }
+                    Button("Reset / Restore All Buttons") { model.resetAllButtons() }
                 }
                 if model.layoutNames.isEmpty {
                     Text("No saved layouts yet.").foregroundStyle(.secondary)
@@ -306,10 +339,30 @@ struct ButtonsView: View {
                     SidePanelView(selected: $selected)
                     Spacer()
                 }
-                let s = SerpentisModel.slot(selected)
-                ButtonEditor(slot: s, current: model.buttons[s.id], isDefault: model.isDefault(s))
-                    .id("\(selected)-\(model.buttons[s.id]?.description ?? "")")
-                LayoutsBox()
+                if !model.detectedButtons.isEmpty {
+                    Text("Additional hardware assignments (event support not yet verified)").font(.headline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 60))]) {
+                        ForEach(model.detectedButtons) { slot in
+                            PadButton(slot: slot, selected: $selected)
+                        }
+                    }
+                    Text("A successful settings reply does not prove a usable button event. These entries restore their captured assignment, not a known factory default.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                let s = model.slot(selected)
+                ButtonEditor(slot: s, current: model.buttons[s.id], isDefault: model.isDefault(s),
+                             preservePhysicalModifiers: model.physicalModifierButtons.contains(s.id))
+                    .id("\(selected)-\(model.buttons[s.id]?.description ?? "")-\(model.physicalModifierButtons.contains(s.id))")
+                HStack {
+                    Text(model.modifierStatus).font(.caption).foregroundStyle(.secondary)
+                    if !model.physicalModifierButtons.isEmpty {
+                        Button("Disable Physical Modifiers") {
+                            model.applyButtonAssignments([], enabledButtons: [])
+                        }
+                        Button("Retry Filter") { model.refresh() }
+                    }
+                }
+                LayoutsBox().disabled(model.busy > 0)
             }.padding(24)
         }
     }
@@ -379,6 +432,7 @@ struct PerformanceView: View {
                         Text("How often the mouse reports its position. 1000 Hz is smoothest.").font(.caption).foregroundStyle(.secondary)
                     }.padding(10)
                 }
+                MouseScrollSettingsView()
             }.padding(24)
         }
         .onAppear { if !loaded { load(); loaded = true } }

@@ -9,8 +9,10 @@ extension AppDelegate {
         menu.addItem(.separator())
         for b in RazerMouse.otherButtons {
             let cur = buttonCache[b.id]
-            let isDefault = cur == b.factory
+            let dynamic = modifierPreferences.buttons.contains(b.id)
+            let isDefault = !dynamic && cur == b.factory
             let sub = NSMenu()
+            if dynamic { sub.addItem(label("Physical keyboard modifiers enabled")) }
             sub.addItem(item("Default", #selector(otherDefault(_:)), tag: Int(b.id), checked: isDefault))
             sub.addItem(item("Choose Key…", #selector(otherChooseKey(_:)), tag: Int(b.id), checked: !isDefault && cur?[3] == 0x02))
             let mm = NSMenu()
@@ -20,7 +22,7 @@ extension AppDelegate {
             }
             let mi = submenu("Mouse Button", mm); mi.state = (!isDefault && cur?[3] == 0x01) ? .on : .off
             sub.addItem(mi)
-            let shown = isDefault ? "Default" : describeButton(cur)
+            let shown = isDefault ? "Default" : describeButton(cur) + (dynamic ? " + physical modifiers" : "")
             menu.addItem(submenu("\(b.name):   \(shown)", sub))
         }
         menu.addItem(.separator())
@@ -54,11 +56,9 @@ extension AppDelegate {
     }
 
     @objc func resetOtherButtons() {
-        guard let m = mouse else { return }
-        var failed = 0
-        for b in RazerMouse.otherButtons { if !m.setButton(b.factory) { failed += 1 } }
-        loadButtons()
-        if failed > 0 { message("\(failed) button(s) didn't reset", "Try again with the cable plugged in.") }
+        let ids = Set(RazerMouse.otherButtons.map(\.id))
+        model.applyButtonAssignments(RazerMouse.otherButtons.map(\.factory),
+                                     enabledButtons: modifierPreferences.buttons.subtracting(ids))
     }
 
     // MARK: Power

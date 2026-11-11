@@ -42,6 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var colorKind: EffectKind = .staticColor
     var buttonCache: [UInt8: [UInt8]] = [:]
     var lastAutoLayout: String?
+    var settingsDefaults: UserDefaults = .standard
+    var modifierPreferences = ModifierPreferences()
+    var scrollTimer: Timer?
+    lazy var scrollController = ScrollDirectionController(defaults: settingsDefaults, onChange: { [weak self] state in
+        self?.model.scrollState = state
+        if let error = state.error { self?.model.errorText = error }
+    })
 
     // MARK: - Startup
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,8 +59,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusItem.menu = menu
         model.app = self
         migrateFromNagaControl()
+        do {
+            modifierPreferences = try loadModifierPreferences()
+            model.physicalModifierButtons = modifierPreferences.buttons
+        } catch {
+            model.errorText = "Could not load physical-modifier options; filtering is disabled: \(error.localizedDescription)"
+        }
         setupMainMenu()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        startScrollTracking()
         startHID()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appActivated(_:)),
                                                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
@@ -88,7 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let preferred = candidates.first {
             (IOHIDDeviceGetProperty($0, kIOHIDProductIDKey as CFString) as? Int) == 0x00E7
         } ?? candidates.first
-        if let cur = mouse, let p = preferred, CFEqual(cur.device, p) { return }
+        if let cur = mouse, let device = cur.device, let p = preferred, CFEqual(device, p) { return }
+        model.stopModifierFiltering()
+        scrollController.disconnect()
         mouse = nil
         openFailed = false
         lights = [:]
@@ -98,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if let p = preferred {
             if let m = RazerMouse(device: p) {
                 mouse = m
+                identifyScrollDevice(m)
                 reloadLights()
                 loadButtons()
                 refreshBattery()
@@ -171,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         refreshBattery()
         menu.addItem(label("Razer Naga V3 Pro — \(m.connectionName)"))
+        if !modifierPreferences.buttons.isEmpty { menu.addItem(label(model.modifierStatus)) }
         guard let b = battery else {
             menu.addItem(label("Mouse asleep or out of range — move it to wake"))
             addFooter(menu); return
@@ -382,12 +400,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: - Profiles
     let profilesKey = "profiles"
     func loadProfiles() -> [String: Profile] {
-        guard let d = UserDefaults.standard.data(forKey: profilesKey),
+        guard let d = settingsDefaults.data(forKey: profilesKey),
               let p = try? JSONDecoder().decode([String: Profile].self, from: d) else { return [:] }
         return p
     }
     func storeProfiles(_ p: [String: Profile]) {
-        if let d = try? JSONEncoder().encode(p) { UserDefaults.standard.set(d, forKey: profilesKey) }
+        if let d = try? JSONEncoder().encode(p) { settingsDefaults.set(d, forKey: profilesKey) }
     }
 
     @objc func saveProfile() {
@@ -447,6 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: - Window
     @objc func openWindow() {
+        scrollController.refreshSystem(force: true)
         if window == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -467,6 +486,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func windowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        stopScrollTracking()
+        model.stopModifierFiltering(wait: true)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openWindow(); return true

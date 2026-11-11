@@ -112,8 +112,10 @@ extension AppDelegate {
         menu.addItem(.separator())
         for (i, id) in RazerMouse.sideButtonIDs.enumerated() {
             let cur = buttonCache[id]
-            let isDefault = cur.map { $0[3] == 0x02 && $0[5] == 0 && $0[6] == RazerMouse.defaultKeys[i] } ?? false
+            let dynamic = modifierPreferences.buttons.contains(id)
+            let isDefault = !dynamic && (cur.map { $0[3] == 0x02 && $0[5] == 0 && $0[6] == RazerMouse.defaultKeys[i] } ?? false)
             let sub = NSMenu()
+            if dynamic { sub.addItem(label("Physical keyboard modifiers enabled")) }
             sub.addItem(item("Default (\(hidKeyName(RazerMouse.defaultKeys[i])))", #selector(buttonDefault(_:)), tag: i, checked: isDefault))
             sub.addItem(item("Choose Key…", #selector(buttonChooseKey(_:)), tag: i, checked: !isDefault && cur?[3] == 0x02))
             let mm = NSMenu()
@@ -122,7 +124,7 @@ extension AppDelegate {
             }
             let mi = submenu("Mouse Button", mm); mi.state = cur?[3] == 0x01 ? .on : .off
             sub.addItem(mi)
-            menu.addItem(submenu("Button \(i + 1):   \(describeButton(cur))", sub))
+            menu.addItem(submenu("Button \(i + 1):   \(describeButton(cur))\(dynamic ? " + physical modifiers" : "")", sub))
         }
         menu.addItem(.separator())
         menu.addItem(item("Reset All to Default (1 – =)", #selector(resetAllButtons)))
@@ -159,12 +161,7 @@ extension AppDelegate {
     }
 
     func writeButton(_ args: [UInt8]) {
-        guard let m = mouse else { return }
-        if m.setButton(args) {
-            buttonCache[args[1]] = m.button(args[1]) ?? args
-        } else {
-            message("The mouse didn't accept that", "Nothing was changed. If you're on wireless, try with the cable plugged in and tell Claude.")
-        }
+        model.setButton(args)
     }
 
     @objc func buttonDefault(_ s: NSMenuItem) { writeButton(RazerMouse.defaultArgs(s.tag)) }
@@ -198,21 +195,19 @@ extension AppDelegate {
     }
 
     @objc func resetAllButtons() {
-        guard let m = mouse else { return }
-        var failed = 0
-        for i in 0..<12 { if !m.setButton(RazerMouse.defaultArgs(i)) { failed += 1 } }
-        loadButtons()
-        if failed > 0 { message("\(failed) button(s) didn't reset", "Try again with the cable plugged in.") }
+        let ids = Set(RazerMouse.sideButtonIDs)
+        model.applyButtonAssignments((0..<12).map { RazerMouse.defaultArgs($0) },
+                                     enabledButtons: modifierPreferences.buttons.subtracting(ids))
     }
 
     // MARK: Layouts
     func loadLayouts() -> [String: [[UInt8]]] {
-        guard let d = UserDefaults.standard.data(forKey: layoutsKey),
+        guard let d = settingsDefaults.data(forKey: layoutsKey),
               let l = try? JSONDecoder().decode([String: [[UInt8]]].self, from: d) else { return [:] }
         return l
     }
     func storeLayouts(_ l: [String: [[UInt8]]]) {
-        if let d = try? JSONEncoder().encode(l) { UserDefaults.standard.set(d, forKey: layoutsKey) }
+        if let d = try? JSONEncoder().encode(l) { settingsDefaults.set(d, forKey: layoutsKey) }
     }
 
     @objc func saveLayout() {
@@ -226,26 +221,23 @@ extension AppDelegate {
         let name = f.stringValue.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
         loadButtons()
-        var list = RazerMouse.sideButtonIDs.enumerated().map { buttonCache[$0.element] ?? RazerMouse.defaultArgs($0.offset) }
-        list += RazerMouse.otherButtons.map { buttonCache[$0.id] ?? $0.factory }
+        let list = model.allSlots.map { buttonCache[$0.id] ?? model.buttons[$0.id] ?? $0.factory }
         var all = loadLayouts(); all[name] = list; storeLayouts(all)
+        saveModifierLayout(name)
     }
 
-    func applyLayout(_ list: [[UInt8]], completion: (() -> Void)? = nil) {
-        guard let m = mouse else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            for args in list where args.count == 10 { m.setButton(args) }
-            DispatchQueue.main.async { self.loadButtons(); completion?() }
-        }
+    func applyLayout(_ list: [[UInt8]], enabledButtons: Set<UInt8> = [], completion: (() -> Void)? = nil) {
+        model.applyButtonAssignments(list, enabledButtons: enabledButtons, completion: completion)
     }
 
     @objc func loadLayout(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String, let l = loadLayouts()[n] else { return }
-        applyLayout(l)
+        applyLayout(l, enabledButtons: modifierPreferences.layouts[n] ?? [])
     }
     @objc func deleteLayout(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String else { return }
         var all = loadLayouts(); all[n] = nil; storeLayouts(all)
+        deleteModifierLayout(n)
         if UserDefaults.standard.string(forKey: autoWoWKey) == n { UserDefaults.standard.removeObject(forKey: autoWoWKey) }
         if UserDefaults.standard.string(forKey: autoOtherKey) == n { UserDefaults.standard.removeObject(forKey: autoOtherKey) }
     }
@@ -263,6 +255,7 @@ extension AppDelegate {
     }
 
     @objc func appActivated(_ note: Notification) {
+        scrollController.refreshSystem()
         guard mouse != nil, let wowLayout = UserDefaults.standard.string(forKey: autoWoWKey),
               let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
@@ -272,6 +265,6 @@ extension AppDelegate {
         guard target != lastAutoLayout else { return }
         lastAutoLayout = target
         let list = target == "__default__" ? (0..<12).map { RazerMouse.defaultArgs($0) } : (loadLayouts()[target] ?? [])
-        applyLayout(list)
+        applyLayout(list, enabledButtons: modifierPreferences.layouts[target] ?? [])
     }
 }

@@ -8,6 +8,7 @@ struct ButtonSlot: Identifiable, Hashable {
     let short: String
     let factory: [UInt8]
     let defaultText: String
+    var factoryKnown = true
 }
 
 final class SerpentisModel: ObservableObject {
@@ -30,9 +31,18 @@ final class SerpentisModel: ObservableObject {
     @Published var loadedOnce = false
     @Published var layoutNames: [String] = []
     @Published var profileNames: [String] = []
+    @Published var physicalModifierButtons: Set<UInt8> = []
+    @Published var modifierStatus = "Physical modifiers off"
+    @Published var detectedButtons: [ButtonSlot] = []
+    @Published var scrollState = ScrollState()
 
     private let queue = DispatchQueue(label: "serpentis.io")
     private var pendingLight: DispatchWorkItem?
+    private let modifierTap = ModifierEventTap()
+    private var capturedAssignments: [UInt8: [UInt8]] = [:]
+
+    var allSlots: [ButtonSlot] { Self.slots + detectedButtons }
+    func slot(_ id: UInt8) -> ButtonSlot { allSlots.first { $0.id == id } ?? Self.slots[0] }
 
     static let slots: [ButtonSlot] = {
         var s: [ButtonSlot] = []
@@ -40,8 +50,8 @@ final class SerpentisModel: ObservableObject {
             s.append(ButtonSlot(id: RazerMouse.sideButtonIDs[i], name: "Side Button \(i + 1)", short: "\(i + 1)",
                                 factory: RazerMouse.defaultArgs(i), defaultText: "Types \(hidKeyName(RazerMouse.defaultKeys[i]))"))
         }
-        let shorts = ["Click", "◀", "▶", "Top"]
-        let texts = ["Middle click", "Scroll left", "Scroll right", "Built-in function (wheel mode)"]
+        let shorts = ["Click", "◀", "▶", "Top", "Right"]
+        let texts = ["Middle click", "Scroll left", "Scroll right", "Built-in function (wheel mode)", "Right click"]
         for (i, b) in RazerMouse.otherButtons.enumerated() {
             s.append(ButtonSlot(id: b.id, name: b.name, short: shorts[i], factory: b.factory, defaultText: texts[i]))
         }
@@ -50,28 +60,33 @@ final class SerpentisModel: ObservableObject {
     static func slot(_ id: UInt8) -> ButtonSlot { slots.first { $0.id == id } ?? slots[0] }
 
     func isDefault(_ s: ButtonSlot) -> Bool {
+        if physicalModifierButtons.contains(s.id) { return false }
         guard let cur = buttons[s.id] else { return true }
         if cur == s.factory { return true }
         // a side button set to its own default key (with either length byte) counts as default
-        return cur.count >= 7 && s.factory[3] == 0x02 && cur[3] == 0x02 && cur[5] == 0 && cur[6] == s.factory[6]
+        return s.factoryKnown && cur.count >= 7 && s.factory[3] == 0x02 && cur[3] == 0x02 && cur[5] == 0 && cur[6] == s.factory[6]
     }
     func describe(_ s: ButtonSlot) -> String {
         guard buttons[s.id] != nil else { return "…" }
-        return isDefault(s) ? "Default (\(s.defaultText.lowercased()))" : describeButton(buttons[s.id])
+        if physicalModifierButtons.contains(s.id) { return describeButton(buttons[s.id]) + " + physical modifiers" }
+        return isDefault(s) && s.factoryKnown ? "Default (\(s.defaultText.lowercased()))" : describeButton(buttons[s.id])
     }
 
     // MARK: Refresh
     func refresh() {
         reloadNames()
+        guard busy == 0 else { return }
         guard let m = app?.mouse else {
             connected = false; asleep = false; battery = nil
             return
         }
         busy += 1
+        let enabledButtons = physicalModifierButtons
         queue.async {
             let bat = m.battery()
             if bat == nil {
                 DispatchQueue.main.async {
+                    guard self.app?.mouse === m else { self.busy -= 1; return }
                     self.busy -= 1; self.connected = true; self.asleep = true; self.connection = m.connectionName
                 }
                 return
@@ -83,15 +98,36 @@ final class SerpentisModel: ObservableObject {
             for z in Zone.allCases { if let l = m.light(z) { ls[z] = l } }
             var bs: [UInt8: [UInt8]] = [:]
             for s in Self.slots { if let a = m.button(s.id) { bs[s.id] = a } }
+            var detected: [ButtonSlot] = []
+            for id in RazerMouse.discoverableButtonIDs {
+                guard let args = m.button(id), args.count == 10, args[1] == id else { continue }
+                bs[id] = args
+                if self.capturedAssignments[id] == nil { self.capturedAssignments[id] = args }
+                if let captured = self.capturedAssignments[id] {
+                    detected.append(ButtonSlot(
+                        id: id, name: String(format: "Hardware Button 0x%02X", id),
+                        short: String(format: "%02X", id), factory: captured,
+                        defaultText: "Restore the assignment captured when this mouse connected", factoryKnown: false
+                    ))
+                }
+            }
             let sl = m.sleepTimer(), lp = m.lowPowerThreshold()
+            var modifierError: String?
+            do { try self.configureModifiers(m, assignments: bs, enabledButtons: enabledButtons) }
+            catch { self.modifierTap.stop(); modifierError = error.localizedDescription }
             DispatchQueue.main.async {
                 self.busy -= 1
+                guard self.app?.mouse === m else { return }
                 self.connected = true; self.asleep = false; self.connection = m.connectionName
                 self.battery = bat; self.charging = chg; self.firmware = fw
                 self.dpi = d; self.stages = st; self.polling = p
                 self.lights = ls; self.buttons = bs
+                self.detectedButtons = detected
                 self.sleepSeconds = sl; self.lowPowerRaw = lp
                 self.loadedOnce = true
+                self.modifierStatus = modifierError == nil && !enabledButtons.isEmpty
+                    ? "Physical-modifier filter active (hardware validation required)" : "Physical modifiers off"
+                if let error = modifierError { self.errorText = error }
                 self.app?.lights = ls
                 for (k, v) in bs { self.app?.buttonCache[k] = v }
                 self.app?.battery = bat; self.app?.charging = chg; self.app?.updateTitle()
@@ -102,6 +138,22 @@ final class SerpentisModel: ObservableObject {
     func reloadNames() {
         layoutNames = (app?.loadLayouts().keys.sorted()) ?? []
         profileNames = (app?.loadProfiles().keys.sorted()) ?? []
+    }
+
+    func identifyScrollDevice(_ mouse: RazerMouse, completion: @escaping (String?) -> Void) {
+        queue.async {
+            let serial = mouse.serial()
+            let identifier: String?
+            if let serial = serial {
+                do { identifier = try scrollDeviceIdentifier(serial: serial) }
+                catch { identifier = nil }
+            } else { identifier = nil }
+            DispatchQueue.main.async {
+                guard self.app?.mouse === mouse else { return }
+                completion(identifier)
+                self.refresh()
+            }
+        }
     }
 
     /// Runs a mouse operation in the background, then refreshes everything.
@@ -119,35 +171,121 @@ final class SerpentisModel: ObservableObject {
     }
 
     // MARK: Buttons
-    func setButton(_ args: [UInt8]) {
-        run("The mouse didn't accept that button setting. Nothing was changed.") { $0.setButton(args) }
+    private func configureModifiers(_ mouse: RazerMouse, assignments: [UInt8: [UInt8]], enabledButtons: Set<UInt8>) throws {
+        let configuration = try ModifierConfiguration(assignments: assignments, enabledButtons: enabledButtons)
+        if configuration.keys.isEmpty { modifierTap.stop(); return }
+        guard let device = mouse.device else { throw ModifierError.identification }
+        try modifierTap.configure(configuration, device: device) { [weak self] error in
+            guard let self = self else { return }
+            self.queue.async { self.modifierTap.stop() }
+            DispatchQueue.main.async {
+                self.modifierStatus = "Physical modifiers unavailable"
+                self.errorText = error.localizedDescription
+            }
+        }
+    }
+
+    func stopModifierFiltering(wait: Bool = false) {
+        let stop = { self.modifierTap.stop(); self.capturedAssignments = [:] }
+        if wait { queue.sync(execute: stop) }
+        else { queue.async(execute: stop) }
+        detectedButtons = []
+        modifierStatus = "Physical modifiers off"
+    }
+
+    func setButton(_ args: [UInt8], preservePhysicalModifiers: Bool = false, applyToMatchingButtons: Bool = false) {
+        guard args.count == 10 else { errorText = "Invalid button assignment."; return }
+        var enabled = physicalModifierButtons
+        var ids: Set<UInt8> = [args[1]]
+        if applyToMatchingButtons, args[3] == 2 {
+            for (id, other) in buttons where other.count == 10 && other[3] == 2 && other[6] == args[6] {
+                ids.insert(id)
+            }
+        }
+        if preservePhysicalModifiers { enabled.formUnion(ids) }
+        else { enabled.subtract(ids) }
+        applyButtonAssignments([args], enabledButtons: enabled)
+    }
+
+    func applyButtonAssignments(_ list: [[UInt8]], enabledButtons: Set<UInt8>, completion: (() -> Void)? = nil) {
+        guard busy == 0 else {
+            errorText = "Wait for the current mouse operation to finish before changing button assignments."
+            return
+        }
+        guard let app = app, let mouse = app.mouse else { errorText = "The mouse isn't connected."; return }
+        var next = buttons
+        for args in list {
+            guard args.count == 10, args[1] != 1 else { errorText = "Invalid or locked button assignment."; return }
+            next[args[1]] = args
+        }
+        do { _ = try ModifierConfiguration(assignments: next, enabledButtons: enabledButtons) }
+        catch { errorText = error.localizedDescription; return }
+        let previous = buttons
+        let previousEnabled = physicalModifierButtons
+        busy += 1
+        queue.async {
+            var attempted: [UInt8] = []
+            do {
+                try self.configureModifiers(mouse, assignments: next, enabledButtons: enabledButtons)
+                for args in list {
+                    attempted.append(args[1])
+                    guard mouse.setButton(args) else { throw ModifierError.writeFailed }
+                }
+                DispatchQueue.main.async {
+                    self.busy -= 1
+                    guard app.mouse === mouse else { return }
+                    app.modifierPreferences.buttons = enabledButtons
+                    app.persistModifierPreferences()
+                    self.modifierStatus = enabledButtons.isEmpty
+                        ? "Physical modifiers off" : "Physical-modifier filter active (hardware validation required)"
+                    self.refresh()
+                    completion?()
+                }
+            } catch {
+                var message = error.localizedDescription
+                var restored = true
+                for id in Set(attempted) {
+                    if let args = previous[id], mouse.setButton(args) { continue }
+                    restored = false
+                    message += "\nCould not restore the previous assignment for button \(id)."
+                }
+                if restored {
+                    do { try self.configureModifiers(mouse, assignments: previous, enabledButtons: previousEnabled) }
+                    catch {
+                        self.modifierTap.stop()
+                        message += "\nThe previous input filter could not be restored: \(error.localizedDescription)"
+                    }
+                } else { self.modifierTap.stop() }
+                DispatchQueue.main.async {
+                    self.busy -= 1
+                    guard app.mouse === mouse else { return }
+                    self.errorText = message
+                    self.modifierStatus = "Physical modifiers unavailable"
+                    self.refresh()
+                }
+            }
+        }
     }
     func resetAllButtons() {
-        run("Some buttons didn't reset. Try again with the cable plugged in.") { m in
-            var ok = true
-            for s in Self.slots { if !m.setButton(s.factory) { ok = false } }
-            return ok
-        }
+        applyButtonAssignments(allSlots.map(\.factory), enabledButtons: [])
     }
 
     // MARK: Layouts & auto-switch
     func saveLayout(_ name: String) {
         guard let app = app else { return }
-        let list = Self.slots.map { buttons[$0.id] ?? $0.factory }
+        let list = allSlots.map { buttons[$0.id] ?? $0.factory }
         var all = app.loadLayouts(); all[name] = list; app.storeLayouts(all)
+        app.saveModifierLayout(name)
         reloadNames()
     }
     func loadLayout(_ name: String) {
         guard let list = app?.loadLayouts()[name] else { return }
-        run("Some buttons in that layout weren't accepted.") { m in
-            var ok = true
-            for a in list where a.count == 10 { if !m.setButton(a) { ok = false } }
-            return ok
-        }
+        applyButtonAssignments(list, enabledButtons: app?.modifierPreferences.layouts[name] ?? [])
     }
     func deleteLayout(_ name: String) {
         guard let app = app else { return }
         var all = app.loadLayouts(); all[name] = nil; app.storeLayouts(all)
+        app.deleteModifierLayout(name)
         if autoWoW == name { autoWoW = "" }
         if autoOther == name { autoOther = "" }
         reloadNames()
